@@ -99,10 +99,10 @@ func (r *SmoothActionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Check if already in terminal state
-	if smoothAction.Status.State == "Applied" || 
-	   smoothAction.Status.State == "RolledBack" || 
-	   smoothAction.Status.State == "Declined" || 
-	   smoothAction.Status.State == "Error" {
+	if smoothAction.Status.State == "Applied" ||
+		smoothAction.Status.State == "RolledBack" ||
+		smoothAction.Status.State == "Declined" ||
+		smoothAction.Status.State == "Error" {
 		log.Info("SmoothAction in terminal state", "state", smoothAction.Status.State)
 		return ctrl.Result{}, nil
 	}
@@ -118,14 +118,14 @@ func (r *SmoothActionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if smoothAction.Spec.Approval.ApprovedBy != "" {
 			log.Info("Approval received, proceeding with execution",
 				"approvedBy", smoothAction.Spec.Approval.ApprovedBy)
-			r.Recorder.Event(smoothAction, "Normal", "Approved", 
+			r.Recorder.Event(smoothAction, "Normal", "Approved",
 				fmt.Sprintf("Approved by %s", smoothAction.Spec.Approval.ApprovedBy))
 		}
 	}
 
 	// AUTO MODE or APPROVED SUGGEST MODE: Execute
-	if (smoothAction.Spec.Mode == "auto" || smoothAction.Spec.Approval.ApprovedBy != "") && 
-	   smoothAction.Status.State == "Proposed" {
+	if (smoothAction.Spec.Mode == "auto" || smoothAction.Spec.Approval.ApprovedBy != "") &&
+		smoothAction.Status.State == "Proposed" {
 
 		log.Info("Executing SmoothAction", "mode", smoothAction.Spec.Mode)
 
@@ -144,7 +144,7 @@ func (r *SmoothActionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		// Phase 6: Clear any previous errors
 		smoothAction.Status.Errors = []string{}
 
-		r.Recorder.Event(smoothAction, "Normal", "Applied", 
+		r.Recorder.Event(smoothAction, "Normal", "Applied",
 			fmt.Sprintf("Successfully applied %d manifests", len(smoothAction.Spec.Patches)))
 
 		log.Info("SmoothAction executed successfully",

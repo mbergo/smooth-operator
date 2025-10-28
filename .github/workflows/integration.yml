@@ -1,0 +1,87 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  integration-test:
+    name: Integration Tests with Kind
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Install dependencies
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: smooth-operator-test
+          wait: 30s
+
+      - name: Build operator
+        run: make build
+
+      - name: Install CRDs
+        run: make install
+
+      - name: Run integration tests
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
+        run: |
+          # Start operator in background
+          make run &
+          OPERATOR_PID=$!
+          
+          # Wait for operator to be ready
+          sleep 10
+          
+          # Apply sample ChatSession
+          kubectl apply -f config/samples/smooth_v1_chatsession.yaml
+          
+          # Wait for processing
+          sleep 30
+          
+          # Check if ChatSession was processed
+          kubectl get chatsessions
+          kubectl get smoothactions
+          
+          # Verify ChatSession status
+          STATUS=$(kubectl get chatsession chatsession-sample -o jsonpath='{.status.state}')
+          echo "ChatSession status: $STATUS"
+          
+          if [ "$STATUS" != "Completed" ] && [ "$STATUS" != "Processing" ]; then
+            echo "❌ ChatSession not processed correctly"
+            exit 1
+          fi
+          
+          echo "✅ Integration test passed!"
+          
+          # Cleanup
+          kill $OPERATOR_PID || true
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          kubectl get all --all-namespaces
+          kubectl describe chatsessions
+          kubectl describe smoothactions
+
+      - name: Cleanup
+        if: always()
+        run: |
+          make uninstall || true
+          kind delete cluster --name smooth-operator-test || true
+

@@ -1,0 +1,93 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 0 * * *'  # Daily at midnight
+
+jobs:
+  e2e-test:
+    name: End-to-End Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        kubernetes-version: ['1.28.0', '1.29.0', '1.30.0']
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: smooth-e2e
+          node_image: kindest/node:v${{ matrix.kubernetes-version }}
+          wait: 60s
+
+      - name: Build and load image
+        run: |
+          make docker-build IMG=smooth-operator:e2e
+          kind load docker-image smooth-operator:e2e --name smooth-e2e
+
+      - name: Install CRDs
+        run: make install
+
+      - name: Deploy operator
+        run: make deploy IMG=smooth-operator:e2e
+
+      - name: Wait for operator
+        run: |
+          kubectl wait --for=condition=available --timeout=120s \
+            deployment/smooth-operator-controller-manager \
+            -n smooth-operator-system
+
+      - name: Run E2E tests
+        run: |
+          # Test 1: Create ChatSession and verify processing
+          kubectl apply -f config/samples/smooth_v1_chatsession.yaml
+          
+          # Wait for ChatSession to be processed
+          kubectl wait --for=jsonpath='{.status.state}'=Completed \
+            chatsession/chatsession-sample \
+            --timeout=120s || true
+          
+          # Verify SmoothAction was created
+          kubectl get smoothactions
+          
+          # Check operator logs
+          kubectl logs -n smooth-operator-system \
+            deployment/smooth-operator-controller-manager \
+            --tail=100
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          echo "=== ChatSessions ==="
+          kubectl get chatsessions -A -o yaml
+          
+          echo "=== SmoothActions ==="
+          kubectl get smoothactions -A -o yaml
+          
+          echo "=== Operator Logs ==="
+          kubectl logs -n smooth-operator-system \
+            deployment/smooth-operator-controller-manager \
+            --tail=500
+          
+          echo "=== Events ==="
+          kubectl get events -A --sort-by='.lastTimestamp'
+
+      - name: Cleanup
+        if: always()
+        run: |
+          make undeploy || true
+          make uninstall || true
+          kind delete cluster --name smooth-e2e || true
+

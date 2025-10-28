@@ -1,0 +1,94 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build Operator
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run go fmt
+        run: |
+          go fmt ./...
+          git diff --exit-code
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: make test
+
+      - name: Build binary
+        run: make build
+
+      - name: Build Docker image
+        run: make docker-build IMG=smooth-operator:test
+
+  lint:
+    name: Lint Code
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+
+  manifests:
+    name: Verify Generated Manifests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Generate manifests
+        run: make manifests generate
+
+      - name: Verify no changes
+        run: |
+          git diff --exit-code
+          if [ $? -ne 0 ]; then
+            echo "❌ Generated files are out of date. Run 'make manifests generate' and commit."
+            exit 1
+          fi
+          echo "✅ Generated files are up to date"
+

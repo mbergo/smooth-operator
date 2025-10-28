@@ -1,0 +1,55 @@
+{
+  "dashboard": {
+    "title": "Smooth Operator - Overview",
+    "tags": ["smooth-operator", "kubernetes", "gitops"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "ChatSessions Processed",
+        "targets": [
+          {
+            "expr": "sum(smooth_chatsessions_total) by (state)"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "LLM Inference Latency",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(smooth_inference_latency_seconds_bucket[5m]))"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Actions Applied",
+        "targets": [
+          {
+            "expr": "sum(rate(smooth_actions_applied_total[5m])) by (mode)"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Rollbacks",
+        "targets": [
+          {
+            "expr": "sum(smooth_rollbacks_total) by (reason)"
+          }
+        ],
+        "type": "stat"
+      },
+      {
+        "title": "Policy Blocks",
+        "targets": [
+          {
+            "expr": "sum(smooth_policy_blocks_total) by (policy)"
+          }
+        ],
+        "type": "table"
+      }
+    ]
+  }
+}
+

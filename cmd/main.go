@@ -42,6 +42,7 @@ import (
 	"github.com/mbergo/smooth-operator/internal/llm"
 	"github.com/mbergo/smooth-operator/internal/logs"
 	"github.com/mbergo/smooth-operator/internal/metrics"
+	"github.com/mbergo/smooth-operator/internal/planner"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -239,12 +240,23 @@ func main() {
 		setupLog.Info("LLM integration disabled (set OPENAI_API_KEY to enable)")
 	}
 
-	// 6. Setup ChatSession Controller
+	// 6. Policy & Planning Engine
+	riskOptions := planner.DefaultRiskAssessorOptions()
+	plannerEngine := planner.NewPlanner(mgr.GetClient(), riskOptions)
+	reporter := planner.NewReporter()
+	setupLog.Info("🛡️  Policy engine initialized",
+		"minConfidence", riskOptions.MinConfidence,
+		"highRiskNamespaces", riskOptions.HighRiskNamespaces,
+	)
+
+	// 7. Setup ChatSession Controller
 	if err := (&controller.ChatSessionReconciler{
 		Client:     mgr.GetClient(),
 		Scheme:     mgr.GetScheme(),
 		Aggregator: aggregator,
 		LLMClient:  llmClient,
+		Planner:    plannerEngine,
+		Reporter:   reporter,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ChatSession")
 		os.Exit(1)

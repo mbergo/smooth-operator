@@ -36,6 +36,7 @@ import (
 	smoothv1 "github.com/mbergo/smooth-operator/api/v1"
 	"github.com/mbergo/smooth-operator/internal/collector"
 	"github.com/mbergo/smooth-operator/internal/llm"
+	"github.com/mbergo/smooth-operator/internal/planner"
 )
 
 // ChatSessionReconciler reconciles a ChatSession object
@@ -44,6 +45,8 @@ type ChatSessionReconciler struct {
 	Scheme      *runtime.Scheme
 	Aggregator  *collector.Aggregator
 	LLMClient   *llm.Client
+	Planner     *planner.Planner
+	Reporter    *planner.Reporter
 }
 
 // +kubebuilder:rbac:groups=smooth.smooth.k8s.io,resources=chatsessions,verbs=get;list;watch;create;update;patch;delete
@@ -205,8 +208,46 @@ func (r *ChatSessionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				"risk", llmResponse.Risk,
 			)
 
-			// Create SmoothAction CRD with LLM results
-			err = r.createSmoothAction(ctx, chatSession, llmResponse)
+			// Stage 3: Policy & Planning validation (Phase 3 implementation)
+			log.Info("Validating plan with policies and risk assessment")
+
+			executionPlan, err := r.Planner.CreatePlan(
+				ctx,
+				llmResponse,
+				chatSession.Spec.TargetNamespace,
+				chatSession.Spec.PreferAuto,
+			)
+			if err != nil {
+				log.Error(err, "Failed to create execution plan")
+				chatSession.Status.State = "Failed"
+				chatSession.Status.Reason = fmt.Sprintf("Plan validation failed: %v", err)
+				chatSession.Status.LastUpdated = metav1.Now().Format(time.RFC3339)
+
+				if updateErr := r.Status().Update(ctx, chatSession); updateErr != nil {
+					log.Error(updateErr, "Failed to update status after plan failure")
+				}
+				return ctrl.Result{}, err
+			}
+
+			// Log plan summary
+			planSummary := r.Reporter.FormatPlanSummary(executionPlan)
+			log.Info("Execution plan created",
+				"manifests", len(executionPlan.Manifests),
+				"policyViolations", len(executionPlan.PolicyResults.Violations),
+				"overallRisk", executionPlan.RiskAssessment.OverallRisk,
+				"recommendation", executionPlan.RiskAssessment.Recommendation,
+			)
+			log.V(1).Info("Plan summary", "summary", planSummary)
+
+			// Check if plan can be auto-applied
+			canAutoApply := r.Planner.ShouldAutoApply(executionPlan, chatSession.Spec.PreferAuto)
+			log.Info("Auto-apply decision",
+				"requested", chatSession.Spec.PreferAuto,
+				"allowed", canAutoApply,
+			)
+
+			// Create SmoothAction CRD with validated plan
+			err = r.createSmoothAction(ctx, chatSession, llmResponse, executionPlan)
 			if err != nil {
 				log.Error(err, "Failed to create SmoothAction")
 				return ctrl.Result{}, err
@@ -255,7 +296,7 @@ func (r *ChatSessionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 
 		log.Info("Context collection complete (LLM not enabled)")
-		return ctrl.Result{}, nil
+	return ctrl.Result{}, nil
 	}
 
 	// If we get here, the session is in an unknown state
@@ -263,11 +304,12 @@ func (r *ChatSessionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
-// createSmoothAction creates a SmoothAction CRD from LLM response
+// createSmoothAction creates a SmoothAction CRD from LLM response and validated plan
 func (r *ChatSessionReconciler) createSmoothAction(
 	ctx context.Context,
 	chatSession *smoothv1.ChatSession,
 	llmResp *llm.LLMResponse,
+	executionPlan *planner.Plan,
 ) error {
 	log := logf.FromContext(ctx)
 
@@ -275,6 +317,11 @@ func (r *ChatSessionReconciler) createSmoothAction(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("action-%s", chatSession.Name),
 			Namespace: chatSession.Namespace,
+			Annotations: map[string]string{
+				"smooth.k8s.io/risk":          executionPlan.RiskAssessment.OverallRisk,
+				"smooth.k8s.io/confidence":    fmt.Sprintf("%.0f", executionPlan.RiskAssessment.LLMConfidence*100),
+				"smooth.k8s.io/recommendation": executionPlan.RiskAssessment.Recommendation,
+			},
 		},
 		Spec: smoothv1.SmoothActionSpec{
 			ChatRef: chatSession.Name,
@@ -282,9 +329,17 @@ func (r *ChatSessionReconciler) createSmoothAction(
 		},
 	}
 
-	// Set mode based on preferAuto
-	if chatSession.Spec.PreferAuto {
+	// Determine mode based on risk assessment
+	canAutoApply := r.Planner.ShouldAutoApply(executionPlan, chatSession.Spec.PreferAuto)
+	if canAutoApply {
 		smoothAction.Spec.Mode = "auto"
+	} else if chatSession.Spec.PreferAuto {
+		// User wanted auto but risk is too high
+		log.Info("Auto mode requested but blocked by risk assessment",
+			"risk", executionPlan.RiskAssessment.OverallRisk,
+			"confidence", executionPlan.RiskAssessment.LLMConfidence,
+		)
+		smoothAction.Spec.Mode = "suggest"
 	}
 
 	// Convert LLM response to SmoothAction format

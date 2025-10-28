@@ -58,7 +58,7 @@ func (d *DiffGenerator) GenerateDiff(ctx context.Context, manifest *ValidatedMan
 		diff.After = manifest.YAML
 		diff.Summary = fmt.Sprintf("Creating new %s: %s", manifest.Kind, manifest.Name)
 		diff.UnifiedDiff = d.generateUnifiedDiff("", manifest.YAML, manifest.Kind, manifest.Name)
-		
+
 		log.Info("Generated diff for new resource",
 			"kind", manifest.Kind,
 			"name", manifest.Name,
@@ -89,7 +89,7 @@ func (d *DiffGenerator) GenerateDiff(ctx context.Context, manifest *ValidatedMan
 	diff.Before = string(existingYAML)
 	diff.After = manifest.YAML
 	diff.UnifiedDiff = d.generateUnifiedDiff(string(existingYAML), manifest.YAML, manifest.Kind, manifest.Name)
-	
+
 	// Detect changed fields
 	diff.ChangedFields = d.detectChangedFields(existing.Object, manifest.Object.Object)
 	diff.Summary = fmt.Sprintf("Updating %s: %s (%d fields changed)",
@@ -125,7 +125,7 @@ func (d *DiffGenerator) generateUnifiedDiff(before, after, kind, name string) st
 // detectChangedFields compares two objects and returns changed field paths
 func (d *DiffGenerator) detectChangedFields(before, after map[string]interface{}) []string {
 	changed := []string{}
-	
+
 	// Compare spec (most common changes)
 	beforeSpec, beforeHasSpec := before["spec"].(map[string]interface{})
 	afterSpec, afterHasSpec := after["spec"].(map[string]interface{})
@@ -154,7 +154,7 @@ func (d *DiffGenerator) compareMap(prefix string, before, after map[string]inter
 	// Check all keys in after
 	for key, afterValue := range after {
 		beforeValue, exists := before[key]
-		
+
 		if !exists {
 			changed = append(changed, fmt.Sprintf("%s.%s", prefix, key))
 			continue
@@ -199,4 +199,3 @@ func (d *DiffGenerator) FormatDiffForDisplay(diff *ManifestDiff) string {
 
 	return builder.String()
 }
-

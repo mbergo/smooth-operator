@@ -371,4 +371,3 @@ func (p *PrivilegedContainerPolicy) Evaluate(ctx context.Context, obj *unstructu
 
 	return &PolicyResult{Passed: true, PolicyName: p.Name()}
 }
-

@@ -195,4 +195,3 @@ func GetGVK(kind string) schema.GroupVersionKind {
 		Kind:    kind,
 	}
 }
-

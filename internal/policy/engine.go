@@ -35,7 +35,7 @@ type PolicyViolation struct {
 	Namespace string
 
 	// Violation details
-	Message string
+	Message  string
 	Severity string // blocking, warning
 
 	// Suggested fix
@@ -159,4 +159,3 @@ func (e *Engine) EvaluateManifest(ctx context.Context, obj *unstructured.Unstruc
 func (e *Engine) AddPolicy(policy Policy) {
 	e.policies = append(e.policies, policy)
 }
-

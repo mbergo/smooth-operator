@@ -44,7 +44,7 @@ type RiskAssessorOptions struct {
 // DefaultRiskAssessorOptions returns sensible defaults
 func DefaultRiskAssessorOptions() RiskAssessorOptions {
 	return RiskAssessorOptions{
-		MinConfidence:         0.7,  // 70% confidence minimum
+		MinConfidence:         0.7, // 70% confidence minimum
 		HighRiskNamespaces:    []string{"production", "prod", "default", "kube-system"},
 		AllowAutoInProduction: false,
 	}
@@ -210,4 +210,3 @@ func (r *RiskAssessor) ShouldAutoApply(assessment *RiskAssessment, autoModeReque
 	// Only auto-apply low-risk changes with high confidence
 	return assessment.OverallRisk == "low" && assessment.LLMConfidence >= r.confidenceThreshold
 }
-

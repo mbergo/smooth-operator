@@ -159,4 +159,3 @@ func (p *Planner) ShouldAutoApply(plan *Plan, autoModeRequested bool) bool {
 	// Defer to risk assessor
 	return p.riskAssessor.ShouldAutoApply(&plan.RiskAssessment, autoModeRequested)
 }
-

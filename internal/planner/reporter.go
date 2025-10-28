@@ -46,7 +46,7 @@ func (r *Reporter) FormatPlanSummary(plan *Plan) string {
 			changeType = "CREATE"
 		}
 		builder.WriteString(fmt.Sprintf("  %d. [%s] %s/%s", i+1, changeType, manifest.Kind, manifest.Name))
-		
+
 		if manifest.DryRunResult != nil {
 			if manifest.DryRunResult.Success {
 				builder.WriteString(" ✅")
@@ -216,4 +216,3 @@ func (r *Reporter) FormatDiffs(diffs []ManifestDiff) string {
 
 	return builder.String()
 }
-

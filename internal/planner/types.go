@@ -71,13 +71,13 @@ type Diff struct {
 	Kind      string
 	Name      string
 	Namespace string
-	
+
 	// Unified diff format
 	UnifiedDiff string
-	
+
 	// Change type: create, update, delete
 	ChangeType string
-	
+
 	// Number of lines added/removed
 	LinesAdded   int
 	LinesRemoved int
@@ -137,5 +137,3 @@ type RiskFactor struct {
 	Severity string // low, med, high
 	Reason   string
 }
-
-

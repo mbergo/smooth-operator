@@ -42,11 +42,11 @@ import (
 // ChatSessionReconciler reconciles a ChatSession object
 type ChatSessionReconciler struct {
 	client.Client
-	Scheme      *runtime.Scheme
-	Aggregator  *collector.Aggregator
-	LLMClient   *llm.Client
-	Planner     *planner.Planner
-	Reporter    *planner.Reporter
+	Scheme     *runtime.Scheme
+	Aggregator *collector.Aggregator
+	LLMClient  *llm.Client
+	Planner    *planner.Planner
+	Reporter   *planner.Reporter
 }
 
 // +kubebuilder:rbac:groups=smooth.smooth.k8s.io,resources=chatsessions,verbs=get;list;watch;create;update;patch;delete
@@ -296,7 +296,7 @@ func (r *ChatSessionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 
 		log.Info("Context collection complete (LLM not enabled)")
-	return ctrl.Result{}, nil
+		return ctrl.Result{}, nil
 	}
 
 	// If we get here, the session is in an unknown state
@@ -318,8 +318,8 @@ func (r *ChatSessionReconciler) createSmoothAction(
 			Name:      fmt.Sprintf("action-%s", chatSession.Name),
 			Namespace: chatSession.Namespace,
 			Annotations: map[string]string{
-				"smooth.k8s.io/risk":          executionPlan.RiskAssessment.OverallRisk,
-				"smooth.k8s.io/confidence":    fmt.Sprintf("%.0f", executionPlan.RiskAssessment.LLMConfidence*100),
+				"smooth.k8s.io/risk":           executionPlan.RiskAssessment.OverallRisk,
+				"smooth.k8s.io/confidence":     fmt.Sprintf("%.0f", executionPlan.RiskAssessment.LLMConfidence*100),
 				"smooth.k8s.io/recommendation": executionPlan.RiskAssessment.Recommendation,
 			},
 		},

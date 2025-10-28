@@ -43,6 +43,7 @@ import (
 	"github.com/mbergo/smooth-operator/internal/logs"
 	"github.com/mbergo/smooth-operator/internal/metrics"
 	"github.com/mbergo/smooth-operator/internal/planner"
+	"github.com/mbergo/smooth-operator/internal/executor"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -261,9 +262,20 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "ChatSession")
 		os.Exit(1)
 	}
+	// 8. Executor for applying changes
+	executorOptions := executor.DefaultExecutorOptions()
+	executorEngine := executor.NewExecutor(mgr.GetClient(), executorOptions)
+	setupLog.Info("⚙️  Executor initialized",
+		"rolloutTimeout", executorOptions.RolloutTimeout.String(),
+		"enableRollback", executorOptions.EnableRollback,
+	)
+
+	// 9. Setup SmoothAction Controller
 	if err := (&controller.SmoothActionReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Executor: executorEngine,
+		Recorder: mgr.GetEventRecorderFor("smooth-operator"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SmoothAction")
 		os.Exit(1)

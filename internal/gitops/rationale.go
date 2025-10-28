@@ -1,0 +1,146 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package gitops
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/mbergo/smooth-operator/internal/executor"
+	"github.com/mbergo/smooth-operator/internal/llm"
+	"github.com/mbergo/smooth-operator/internal/planner"
+)
+
+// RationaleGenerator creates SMOOTH.md documentation
+type RationaleGenerator struct{}
+
+// NewRationaleGenerator creates a new rationale generator
+func NewRationaleGenerator() *RationaleGenerator {
+	return &RationaleGenerator{}
+}
+
+// GenerateRationale creates a SMOOTH.md document
+func (r *RationaleGenerator) GenerateRationale(
+	chatSessionName string,
+	userPrompt string,
+	llmResponse *llm.LLMResponse,
+	executionPlan *planner.Plan,
+	executionResult *executor.ExecutionResult,
+) string {
+	var doc strings.Builder
+
+	doc.WriteString("# Smooth Operator - Change Rationale\n\n")
+	doc.WriteString(fmt.Sprintf("**Generated**: %s\n", time.Now().Format("2006-01-02 15:04:05 MST")))
+	doc.WriteString(fmt.Sprintf("**ChatSession**: %s\n\n", chatSessionName))
+	doc.WriteString("---\n\n")
+
+	// User Request
+	doc.WriteString("## User Request\n\n")
+	doc.WriteString(fmt.Sprintf("> %s\n\n", userPrompt))
+
+	// AI Analysis
+	doc.WriteString("## AI Analysis\n\n")
+	doc.WriteString(fmt.Sprintf("**LLM Model**: GPT-4 Turbo\n"))
+	doc.WriteString(fmt.Sprintf("**Confidence**: %.0f%%\n", llmResponse.Confidence*100))
+	doc.WriteString(fmt.Sprintf("**Risk Level**: %s\n\n", llmResponse.Risk))
+	doc.WriteString(fmt.Sprintf("**Explanation**: %s\n\n", llmResponse.Explanation))
+
+	// Inferred Needs
+	if len(llmResponse.InferredNeeds) > 0 {
+		doc.WriteString("### Inferred Needs\n\n")
+		for i, need := range llmResponse.InferredNeeds {
+			doc.WriteString(fmt.Sprintf("%d. **%s** (Priority: %s)\n", i+1, need.Type, need.Priority))
+			doc.WriteString(fmt.Sprintf("   - Reason: %s\n", need.Reason))
+		}
+		doc.WriteString("\n")
+	}
+
+	// Policy Results
+	doc.WriteString("## Policy Validation\n\n")
+	if executionPlan.PolicyResults.Passed {
+		doc.WriteString("✅ **All policies passed**\n\n")
+	} else {
+		doc.WriteString(fmt.Sprintf("⚠️ **Policy violations**: %d\n\n", len(executionPlan.PolicyResults.Violations)))
+		for i, violation := range executionPlan.PolicyResults.Violations {
+			doc.WriteString(fmt.Sprintf("%d. [%s] %s\n", i+1, violation.Severity, violation.Policy))
+			doc.WriteString(fmt.Sprintf("   - Issue: %s\n", violation.Message))
+			if violation.SuggestedFix != "" {
+				doc.WriteString(fmt.Sprintf("   - Fix: %s\n", violation.SuggestedFix))
+			}
+		}
+		doc.WriteString("\n")
+	}
+
+	// Risk Assessment
+	doc.WriteString("## Risk Assessment\n\n")
+	doc.WriteString(fmt.Sprintf("**Overall Risk**: %s\n", executionPlan.RiskAssessment.OverallRisk))
+	doc.WriteString(fmt.Sprintf("**Recommendation**: %s\n\n", executionPlan.RiskAssessment.Recommendation))
+
+	if len(executionPlan.RiskAssessment.RiskFactors) > 0 {
+		doc.WriteString("**Risk Factors**:\n")
+		for _, factor := range executionPlan.RiskAssessment.RiskFactors {
+			doc.WriteString(fmt.Sprintf("- [%s] %s: %s\n", factor.Severity, factor.Factor, factor.Reason))
+		}
+		doc.WriteString("\n")
+	}
+
+	// Applied Changes
+	doc.WriteString("## Applied Changes\n\n")
+	if executionResult.Success {
+		doc.WriteString(fmt.Sprintf("✅ **Successfully applied %d resources** in %s\n\n",
+			len(executionResult.AppliedResources),
+			executionResult.ExecutionTime.String()))
+
+		for i, resource := range executionResult.AppliedResources {
+			doc.WriteString(fmt.Sprintf("%d. %s `%s/%s` (%s)\n",
+				i+1, resource.Operation, resource.Kind, resource.Name, resource.AppliedAt.Format("15:04:05")))
+		}
+	} else {
+		doc.WriteString("❌ **Execution failed**\n\n")
+		for _, err := range executionResult.Errors {
+			doc.WriteString(fmt.Sprintf("- %s\n", err))
+		}
+		if executionResult.RolledBack {
+			doc.WriteString("\n🔄 **Automatic rollback performed**\n")
+		}
+	}
+	doc.WriteString("\n")
+
+	// Diffs
+	if len(executionPlan.Diffs) > 0 {
+		doc.WriteString("## Changes Details\n\n")
+		for i, diff := range executionPlan.Diffs {
+			doc.WriteString(fmt.Sprintf("### %d. %s: %s/%s\n\n", i+1, diff.ChangeType, diff.Kind, diff.Name))
+			doc.WriteString(fmt.Sprintf("%s\n\n", diff.Summary))
+			
+			if diff.UnifiedDiff != "" {
+				doc.WriteString("```diff\n")
+				doc.WriteString(diff.UnifiedDiff)
+				doc.WriteString("```\n\n")
+			}
+		}
+	}
+
+	// Footer
+	doc.WriteString("---\n\n")
+	doc.WriteString("*This document was automatically generated by Smooth Operator*\n")
+	doc.WriteString("*For questions or issues, refer to the ChatSession CRD in Kubernetes*\n")
+
+	return doc.String()
+}
+

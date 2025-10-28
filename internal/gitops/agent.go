@@ -112,10 +112,9 @@ func extractAppName(gitPath string) string {
 			parts = append(parts, string(part))
 		}
 	}
-	
+
 	if len(parts) > 0 {
 		return parts[len(parts)-1]
 	}
 	return "app"
 }
-

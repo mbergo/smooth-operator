@@ -127,7 +127,7 @@ func (r *RationaleGenerator) GenerateRationale(
 		for i, diff := range executionPlan.Diffs {
 			doc.WriteString(fmt.Sprintf("### %d. %s: %s/%s\n\n", i+1, diff.ChangeType, diff.Kind, diff.Name))
 			doc.WriteString(fmt.Sprintf("%s\n\n", diff.Summary))
-			
+
 			if diff.UnifiedDiff != "" {
 				doc.WriteString("```diff\n")
 				doc.WriteString(diff.UnifiedDiff)
@@ -143,4 +143,3 @@ func (r *RationaleGenerator) GenerateRationale(
 
 	return doc.String()
 }
-

@@ -131,13 +131,13 @@ metadata:
   labels:
     {{- include "chart.labels" . | nindent 4 }}
 {{- end }}
-`, 
-	resource.Name,
-	resource.Operation,
-	resource.AppliedAt.Format("2006-01-02 15:04:05"),
-	strings.ToLower(resource.Kind),
-	resource.Kind,
-)
+`,
+		resource.Name,
+		resource.Operation,
+		resource.AppliedAt.Format("2006-01-02 15:04:05"),
+		strings.ToLower(resource.Kind),
+		resource.Kind,
+	)
 }
 
 // generateNotes creates NOTES.txt
@@ -149,7 +149,7 @@ func (h *HelmChartGenerator) generateNotes(appName string, executionResult *exec
 	notes.WriteString("Resources created:\n")
 
 	for i, resource := range executionResult.AppliedResources {
-		notes.WriteString(fmt.Sprintf("  %d. %s/%s (%s)\n", 
+		notes.WriteString(fmt.Sprintf("  %d. %s/%s (%s)\n",
 			i+1, resource.Kind, resource.Name, resource.Operation))
 	}
 
@@ -158,4 +158,3 @@ func (h *HelmChartGenerator) generateNotes(appName string, executionResult *exec
 
 	return notes.String()
 }
-

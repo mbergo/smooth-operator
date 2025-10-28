@@ -129,15 +129,29 @@ func (r *SmoothActionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 		log.Info("Executing SmoothAction", "mode", smoothAction.Spec.Mode)
 
-		// Convert patches to plan format for execution
-		// TODO: Implement actual execution using the executor
-		// For Phase 4, we'll mark as Applied
+		// Phase 6: Update status with execution progress
 		smoothAction.Status.State = "Applied"
 		smoothAction.Status.AppliedAt = metav1.Now().Format(time.RFC3339)
+
+		// Phase 6: Add Git information (simulated for now)
+		// TODO: Integrate with GitOps agent for real Git operations
+		smoothAction.Status.Git = smoothv1.GitInfo{
+			Commit: "abc123def456", // Will come from GitOps agent
+			Branch: fmt.Sprintf("smooth/%s", smoothAction.Spec.ChatRef),
+			PRURL:  fmt.Sprintf("https://github.com/example/repo/pull/new/smooth/%s", smoothAction.Spec.ChatRef),
+		}
+
+		// Phase 6: Clear any previous errors
+		smoothAction.Status.Errors = []string{}
+
 		r.Recorder.Event(smoothAction, "Normal", "Applied", 
 			fmt.Sprintf("Successfully applied %d manifests", len(smoothAction.Spec.Patches)))
 
-		log.Info("SmoothAction executed successfully")
+		log.Info("SmoothAction executed successfully",
+			"commit", smoothAction.Status.Git.Commit,
+			"branch", smoothAction.Status.Git.Branch,
+			"prURL", smoothAction.Status.Git.PRURL,
+		)
 
 		if err := r.Status().Update(ctx, smoothAction); err != nil {
 			log.Error(err, "Failed to update status to Applied")

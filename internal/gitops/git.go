@@ -198,4 +198,3 @@ func (g *GitClient) createPullRequest(ctx context.Context, options GitOptions, b
 	prURL := fmt.Sprintf("https://github.com/example/repo/pull/new/%s", branch)
 	return prURL, nil
 }
-

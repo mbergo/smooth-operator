@@ -39,12 +39,12 @@ type SmoothDocument struct {
 
 // GitCommitResult contains the result of a Git operation
 type GitCommitResult struct {
-	Success      bool
-	CommitSHA    string
-	Branch       string
-	PRURL        string
-	Errors       []string
-	Warnings     []string
+	Success   bool
+	CommitSHA string
+	Branch    string
+	PRURL     string
+	Errors    []string
+	Warnings  []string
 }
 
 // GitOptions configures Git operations
@@ -55,4 +55,3 @@ type GitOptions struct {
 	CommitMode    string // "pr" or "direct"
 	Reviewers     []string
 }
-

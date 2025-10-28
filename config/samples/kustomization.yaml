@@ -1,0 +1,5 @@
+## Append samples of your project ##
+resources:
+- smooth_v1_chatsession.yaml
+- smooth_v1_smoothaction.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

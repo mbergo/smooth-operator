@@ -1,0 +1,61 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  - pods
+  - services
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - smooth.smooth.k8s.io
+  resources:
+  - chatsessions
+  - smoothactions
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - smooth.smooth.k8s.io
+  resources:
+  - chatsessions/finalizers
+  - smoothactions/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - smooth.smooth.k8s.io
+  resources:
+  - chatsessions/status
+  - smoothactions/status
+  verbs:
+  - get
+  - patch
+  - update

@@ -1,0 +1,77 @@
+apiVersion: smooth.smooth.k8s.io/v1
+kind: SmoothAction
+metadata:
+  name: smoothaction-sample
+  namespace: default
+spec:
+  # Reference to the ChatSession that triggered this action
+  chatRef: "chatsession-sample"
+  
+  # Mode: suggest (requires approval) or auto (applies automatically if policy passes)
+  mode: "suggest"
+  
+  # Inferred needs determined by the LLM
+  inferredNeeds:
+    - type: "HPA"
+      reason: "Application needs to scale based on CPU usage to handle variable traffic"
+      priority: "high"
+    - type: "Service-LB"
+      reason: "API needs external access via LoadBalancer"
+      priority: "high"
+    - type: "Probe"
+      reason: "Missing readiness and liveness probes for health checking"
+      priority: "med"
+    - type: "NetworkPolicy"
+      reason: "Restrict ingress traffic to only necessary services"
+      priority: "med"
+  
+  # Suggested Kubernetes manifests
+  patches:
+    - kind: "HorizontalPodAutoscaler"
+      yaml: |
+        apiVersion: autoscaling/v2
+        kind: HorizontalPodAutoscaler
+        metadata:
+          name: python-api-hpa
+          namespace: default
+        spec:
+          scaleTargetRef:
+            apiVersion: apps/v1
+            kind: Deployment
+            name: python-api
+          minReplicas: 2
+          maxReplicas: 10
+          metrics:
+          - type: Resource
+            resource:
+              name: cpu
+              target:
+                type: Utilization
+                averageUtilization: 70
+    - kind: "Service"
+      yaml: |
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: python-api
+          namespace: default
+        spec:
+          type: LoadBalancer
+          selector:
+            app: python-api
+          ports:
+          - port: 80
+            targetPort: 8080
+            protocol: TCP
+  
+  # Artifacts that will be generated
+  generatedArtifacts:
+    - type: "helm-chart"
+      path: "apps/python-api/charts/python-api"
+    - type: "grafana-dashboard"
+      path: "apps/python-api/dashboards/overview.json"
+  
+  # Approval settings for suggest mode
+  approval:
+    required: true
+    approvedBy: ""  # Empty until someone approves

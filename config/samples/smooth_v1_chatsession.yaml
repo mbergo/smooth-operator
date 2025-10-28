@@ -1,0 +1,35 @@
+apiVersion: smooth.smooth.k8s.io/v1
+kind: ChatSession
+metadata:
+  name: chatsession-sample
+  namespace: default
+spec:
+  # User identity/email who initiated this chat session
+  user: "developer@example.com"
+  
+  # Target namespace where resources will be deployed/managed
+  targetNamespace: "default"
+  
+  # Natural language prompt from the user
+  prompt: "Deploy a Python API on port 8080, ensure it has health checks, autoscaling, and logs to Loki"
+  
+  # Optional charts/graphs/metrics attached for context
+  charts:
+    - name: "traffic-forecast"
+      url: "https://example.com/charts/traffic-forecast.png"
+    - name: "cpu-usage"
+      blobBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+  
+  # Git repository metadata
+  metadata:
+    gitRepo: "git@github.com:example/microservices.git"
+    gitPath: "apps/python-api"
+    labels:
+      team: "platform"
+      environment: "development"
+  
+  # Whether to automatically apply changes (false = suggest mode, true = auto mode)
+  preferAuto: false
+  
+  # Flag indicating this was created by the Chat UI
+  createdByUI: true

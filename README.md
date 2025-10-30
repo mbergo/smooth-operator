@@ -40,6 +40,15 @@ Operating Kubernetes workloads requires deep YAML expertise and repetitive decis
 - Generate and commit Helm charts to Git
 - Create Grafana dashboards for new services
 
+### Input Requirements
+
+The operator processes `ChatSession` CRDs that contain a git repository reference in their metadata. **The git repository can be any application git repository that the operator is able to fetch** (via SSH or HTTPS). The operator uses this repository to:
+- Understand the application context
+- Commit generated Helm charts and Kubernetes manifests
+- Create pull requests with infrastructure changes
+
+The operator requires appropriate credentials (SSH keys or access tokens) to be configured for fetching from and pushing to the specified git repository.
+
 ## Getting Started
 
 ### Prerequisites

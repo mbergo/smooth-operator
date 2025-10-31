@@ -85,3 +85,4 @@ jobs:
           make uninstall || true
           kind delete cluster --name smooth-operator-test || true
 
+

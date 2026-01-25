@@ -29,3 +29,4 @@ go.work
 # Environment files (contains secrets)
 .env
 .env.local
+kubeconfig-*.yaml

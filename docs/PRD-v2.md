@@ -21,7 +21,8 @@
 4. **Content-addressed git commits.** Operator commits to a `smoothop/bundle-<sha>` branch named by content hash. Replay checks `git ls-remote` for the SHA; skips if present. Closes review BLOCKER 3.1.
 5. **ArgoCD auto-sync deferred to handoff.** `syncPolicy.automated` is disabled during the fix loop; operator triggers syncs manually. Auto-sync enables at the `handed_off` terminal state. Closes review BLOCKER 7.1.
 6. **Terminal journal state.** Add `handed_off` state; resume logic short-circuits on it. Closes review HIGH 7.2.
-7. **ArgoCD HTTPS primary, MCP optional.** Inverted dependency. Phase 3 ships against raw HTTPS regardless of MCP availability. Closes review BLOCKER 2.1.
+7. **ArgoCD MCP primary, raw HTTPS as fallback.** `matthisholleville/argocd-mcp` (v1.6.0, March 2026, 103+ endpoints OpenAPI-driven, OAuth via ArgoCD Dex, audit logging, rate limiting) is verified stable and production-ready. PRD originally hedged this as "community/TBD"; that was wrong. MCP is the primary transport; the auto-probe falls back to raw HTTPS only if MCP is unreachable at boot. Closes review BLOCKER 2.1 with the inversion reversed.
+11. **Anti-intermediate-formats rule.** §9.0 + §5.2 forbid Kustomize, Helm templates, Jsonnet, kubebuilder scaffolding, or any other intermediate representation in the operator ↔ Opus loop. Bundle shape is plain K8s YAML + one ArgoCD Application CRD with `source.directory`. Eliminates an entire class of translation bugs and keeps the validator schema singular.
 8. **`.smoothop/` is operator-owned during session.** Operator warns + advisory-locks the directory while running. User edits inside `.smoothop/` are surfaced to the chat, not silently overwritten.
 9. **Security tightening.** Drop the "zeroed from memory" claim (unachievable in Go with `string` SDK args). Add Redis `requirepass`. Token delivered to UI via pipe, not stdout. Strict CSP + devtools off + no `file://` for Electrobun. Closes review HIGH 5.1 / 5.2 / 5.3 + MEDIUM 5.4.
 10. **Prompt-cache invariants.** Section 8 adds a cache-key invariant subsection: byte-identical system prefix, fixed cache-control breakpoint, deterministic `text/template` rendering, behaviour when `compact-2026-01-12` fires. Closes review HIGH 4.1.
@@ -323,7 +324,12 @@ ResourceBundle. Schema:
 Rules:
 - Every commitFile path MUST start with `.smoothop/`.
 - Plain Kubernetes manifests go under `.smoothop/manifests/` — one
-  resource per file, named `<kind>-<name>.yaml`.
+  resource per file, named `<kind>-<name>.yaml`. Each file MUST be a
+  final-form, kubectl-applicable manifest. No Helm template syntax
+  ({{ ... }}), no Kustomize patches, no Jsonnet, no kubebuilder
+  scaffolding. The operator's validator REJECTS bundles containing
+  `Chart.yaml`, `kustomization.yaml`, `*.jsonnet`, `*.libsonnet`, or
+  any file under `templates/`.
 - Exactly one ArgoCD Application CRD goes at
   `.smoothop/argocd/application.yaml`. Its spec.source MUST be:
     source:
@@ -332,6 +338,8 @@ Rules:
       path: .smoothop/manifests
       directory:
         recurse: true
+  Do NOT emit spec.source.helm, spec.source.kustomize, spec.source.plugin,
+  or spec.sources[]. Plain directory only.
 - spec.syncPolicy MUST NOT include automated.* on the initial bundle.
   Auto-sync is enabled by the operator only at handoff.
 - Optional Terraform under `.smoothop/terraform/`. No interpolation
@@ -343,7 +351,7 @@ Rules:
 Output ONLY the JSON object.
 ```
 
-Helm-chart packaging is intentionally out of scope here. ArgoCD reads plain manifests directly; chart authoring is a Phase 5+ optional output for users who want to redistribute their deployment.
+This shape is the hard contract for the entire operator ↔ Opus loop. Subsequent FIX_LOOP turns produce bundles in the same shape. Opus never proposes a Helm chart, a Kustomize overlay, or any other intermediate representation — Section 9.0 explains why.
 
 ### 5.3 Prompt: `FIX_LOOP`
 
@@ -496,9 +504,25 @@ Triggered by setting `mode: "diff"` in the Operator → Opus envelope. Opus emit
 
 ### 9.1 Transport
 
-**Primary: raw HTTPS against the ArgoCD API server**, using a per-project API token captured at init and stored in the OS keychain. Operator calls land at `https://<argocd-host>/api/v1/applications/...`.
+**Primary: `matthisholleville/argocd-mcp` (v1.6.0+) over MCP.**
 
-**Optional MCP path.** If a vetted ArgoCD MCP server is available at runtime, the operator switches to it for the same call set. Decided by the `argocd.transport = "https" | "mcp"` config knob. MCP is an optimisation, not a dependency. Phase 3 ships raw-HTTPS regardless of MCP availability.
+Verified mature, production-ready ArgoCD MCP server. Exposes 103+ ArgoCD API endpoints driven from ArgoCD's OpenAPI spec at server startup (zero hardcoded tool handlers — adapts to new ArgoCD versions on restart). Two modes: `search_operations` + `execute_operation` meta-tools (default, ~200 token system prompt) or one-typed-tool-per-endpoint (verbose, optional). Built-in audit logging (structured JSON per call), token-bucket rate limiting per user, read-only mode option, resource scoping filters, OAuth via ArgoCD Dex for per-user RBAC.
+
+Install paths: `helm install argocd-mcp oci://ghcr.io/matthisholleville/charts/argocd-mcp`, or `claude mcp add argocd` with Docker env vars for local development, or Claude Desktop JSON config for desktop installs.
+
+**Fallback: raw HTTPS against the ArgoCD API server**, if MCP is unreachable at boot (network policy, missing image, version skew). Decided automatically: operator probes the MCP endpoint on startup; on failure, falls back to raw HTTPS and logs the degradation. Same per-project API token works for both transports.
+
+The `argocd.transport` config knob still exists but defaults to `auto` (probe MCP first); operators can force `https` for environments where MCP is intentionally not deployed.
+
+### 9.0 Anti-intermediate-formats rule (closes loop on tooling sprawl)
+
+The operator and Opus together produce **ArgoCD `Application` CRDs + plain Kubernetes YAML manifests only**. No Kustomize overlays, no Helm chart templates, no Jsonnet, no kubebuilder scaffolding, no CRD-defining Helm umbrella charts. Rationale:
+
+- Every intermediate format is a translation hop between Opus's reasoning and ArgoCD's reconciliation. Each hop is a place for bugs, a place where prompt cache invalidates, and a place where the validator schema fragments.
+- ArgoCD natively consumes plain manifests via `source.directory`. There is no shape ArgoCD reconciles better than the final-form YAML it would compile down to anyway. Picking an intermediate format adds work for zero capability gain.
+- The bundle shape stays singular: `commitFiles[]` with paths under `.smoothop/manifests/` + one `Application` CRD at `.smoothop/argocd/application.yaml`. The MATERIALIZE prompt (§5.2) enforces this. The validator rejects bundles containing `Chart.yaml`, `kustomization.yaml`, `*.jsonnet`, `*.libsonnet`, or any path matching `templates/*.tpl`.
+
+Optional re-distribution as a Helm chart for users who want to share their deployment is a Phase 5+ output **derived from** the manifests; never an input to the operator's pipeline.
 
 ### 9.2 Calls
 
@@ -706,13 +730,13 @@ Concrete code that gets retired:
 - No Helm packager. No OCI registry. Plain manifests under `.smoothop/manifests/` are the v2 deploy artifact.
 - (Optional Helm chart publishing moves to Phase 5+ for users who want redistribution.)
 
-### Phase 3 — ArgoCD HTTPS client (1 week)
+### Phase 3 — ArgoCD MCP client (1 week)
 
-- Raw HTTPS against the ArgoCD API server is the **primary** path. MCP is optional.
-- `applications.upsert/sync/watch` flows against `/api/v1/applications/...`
-- Per-project ArgoCD API token captured at init
-- Fix-loop trigger from `OutOfSync|Degraded` observation via SSE watch
-- Optional MCP-transport switch behind a runtime config knob
+- Integrate `matthisholleville/argocd-mcp` v1.6.0+ as the primary transport.
+- `search_operations` + `execute_operation` meta-tool flow for `applications.upsert/sync/get` and SSE watch.
+- Per-project ArgoCD API token captured at init; passed to the MCP server via env var.
+- Auto-probe at boot; raw HTTPS fallback if MCP is unreachable.
+- Fix-loop trigger from `OutOfSync|Degraded` observation via the MCP server's watch primitive.
 
 ### Phase 4 — Electrobun UI (2 weeks)
 

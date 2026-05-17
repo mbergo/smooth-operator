@@ -115,10 +115,17 @@ func newClientFromOpenAI(oaiClient *openai.Client, options ClientOptions) *Clien
 		retryDelay = 500 * time.Millisecond
 	}
 
+	// Clamp MaxRequestsPerMinute to a sensible minimum: a zero or negative
+	// value would otherwise initialize the limiter with zero tokens, causing
+	// Wait() to block forever instead of failing fast.
+	rpm := options.MaxRequestsPerMinute
+	if rpm <= 0 {
+		rpm = 1
+	}
 	rateLimiter := &RateLimiter{
-		tokens:     options.MaxRequestsPerMinute,
-		maxTokens:  options.MaxRequestsPerMinute,
-		refillRate: time.Minute / time.Duration(max(options.MaxRequestsPerMinute, 1)),
+		tokens:     rpm,
+		maxTokens:  rpm,
+		refillRate: time.Minute / time.Duration(rpm),
 		lastRefill: time.Now(),
 	}
 

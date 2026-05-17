@@ -37,8 +37,9 @@ import (
 )
 
 // SanitizePrompt replaces newlines and control characters with spaces and
-// truncates the result to 200 characters to prevent log injection and
-// oversized prompts from user-supplied ChatRef values.
+// truncates the result to 200 runes to prevent log injection and oversized
+// prompts from user-supplied ChatRef values. Truncation is rune-aware so that
+// multi-byte UTF-8 characters are never split mid-codepoint.
 func SanitizePrompt(s string) string {
 	s = strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\r' || unicode.IsControl(r) {
@@ -46,9 +47,9 @@ func SanitizePrompt(s string) string {
 		}
 		return r
 	}, s)
-	const maxLen = 200
-	if len(s) > maxLen {
-		s = s[:maxLen]
+	const maxRunes = 200
+	if runes := []rune(s); len(runes) > maxRunes {
+		s = string(runes[:maxRunes])
 	}
 	return s
 }

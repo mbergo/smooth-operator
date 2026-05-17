@@ -126,9 +126,30 @@ func TestLoadBalancerInternalAnnotationPolicy(t *testing.T) {
 			wantPassed: true,
 		},
 		{
-			name: "LoadBalancer with internal annotation value 0.0.0.0/0 passes",
+			name: "LoadBalancer with internal annotation value 0.0.0.0/0 is rejected (non-truthy)",
 			obj: makeService("with-ann-cidr", "LoadBalancer", map[string]string{
 				"service.beta.kubernetes.io/aws-load-balancer-internal": "0.0.0.0/0",
+			}, nil),
+			wantPassed: false,
+		},
+		{
+			name: "LoadBalancer with internal annotation set to false is rejected",
+			obj: makeService("with-ann-false", "LoadBalancer", map[string]string{
+				"service.beta.kubernetes.io/aws-load-balancer-internal": "false",
+			}, nil),
+			wantPassed: false,
+		},
+		{
+			name: "LoadBalancer with Azure internal annotation passes",
+			obj: makeService("azure-ann", "LoadBalancer", map[string]string{
+				"service.beta.kubernetes.io/azure-load-balancer-internal": "true",
+			}, nil),
+			wantPassed: true,
+		},
+		{
+			name: "LoadBalancer with GKE internal load-balancer-type passes",
+			obj: makeService("gke-ann", "LoadBalancer", map[string]string{
+				"networking.gke.io/load-balancer-type": "Internal",
 			}, nil),
 			wantPassed: true,
 		},

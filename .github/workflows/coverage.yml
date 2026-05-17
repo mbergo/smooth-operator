@@ -29,6 +29,14 @@ jobs:
             bin/
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
 
+      - name: Install setup-envtest
+        run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+
+      - name: Prepare envtest assets
+        run: |
+          KUBEBUILDER_ASSETS=$(setup-envtest use --bin-dir bin -p path)
+          echo "KUBEBUILDER_ASSETS=$KUBEBUILDER_ASSETS" >> $GITHUB_ENV
+
       - name: Run tests with coverage
         run: |
           go mod download

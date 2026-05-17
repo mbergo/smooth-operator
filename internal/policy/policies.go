@@ -346,9 +346,20 @@ func (p *LoadBalancerInternalAnnotationPolicy) Evaluate(ctx context.Context, obj
 		return &PolicyResult{Passed: true, PolicyName: p.Name()}
 	}
 
+	// Accept any provider's internal-LB annotation. Value must be truthy
+	// ("true"/"1"/"yes") for the AWS-style annotation; non-AWS providers use
+	// a typed value (e.g. networking.gke.io/load-balancer-type: "Internal",
+	// service.beta.kubernetes.io/azure-load-balancer-internal: "true").
+	internalAnnotations := map[string]func(string) bool{
+		"service.beta.kubernetes.io/aws-load-balancer-internal":   isTruthyAnnotationValue,
+		"service.beta.kubernetes.io/azure-load-balancer-internal": isTruthyAnnotationValue,
+		"networking.gke.io/load-balancer-type":                    func(v string) bool { return strings.EqualFold(v, "Internal") },
+		"cloud.google.com/load-balancer-type":                     func(v string) bool { return strings.EqualFold(v, "Internal") },
+	}
+
 	annotations := obj.GetAnnotations()
-	if annotations != nil {
-		if _, ok := annotations["service.beta.kubernetes.io/aws-load-balancer-internal"]; ok {
+	for key, validate := range internalAnnotations {
+		if v, ok := annotations[key]; ok && validate(v) {
 			return &PolicyResult{Passed: true, PolicyName: p.Name()}
 		}
 	}
@@ -356,9 +367,21 @@ func (p *LoadBalancerInternalAnnotationPolicy) Evaluate(ctx context.Context, obj
 	return &PolicyResult{
 		Passed:       false,
 		PolicyName:   p.Name(),
-		Message:      "LoadBalancer Service must have annotation service.beta.kubernetes.io/aws-load-balancer-internal",
+		Message:      "LoadBalancer Service must declare itself internal via a provider-specific annotation",
 		Severity:     p.Severity(),
-		SuggestedFix: `Add annotation: service.beta.kubernetes.io/aws-load-balancer-internal: "true"`,
+		SuggestedFix: `Add annotation: service.beta.kubernetes.io/aws-load-balancer-internal: "true" (AWS), service.beta.kubernetes.io/azure-load-balancer-internal: "true" (Azure), or networking.gke.io/load-balancer-type: "Internal" (GKE)`,
+	}
+}
+
+// isTruthyAnnotationValue reports whether an annotation value represents an
+// explicit "yes/true/on" — used by the AWS/Azure-style internal-LB annotations
+// which take a boolean string. An empty value or "false"/"0" must NOT pass.
+func isTruthyAnnotationValue(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 

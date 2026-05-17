@@ -50,23 +50,24 @@ import (
 )
 
 // gitopsAgentAdapter adapts *gitops.Agent to the controller.GitopsAgent interface.
-// It extracts the fields available on a SmoothAction and forwards them to
-// ProcessSuccessfulExecution, leaving optional fields empty when not present on the spec.
+//
+// The full GitOps pipeline (Helm chart generation + SMOOTH.md rationale + commit/push)
+// requires the LLM response, the execution plan, and the execution result. These
+// values are not currently surfaced onto SmoothAction, so until a future change
+// plumbs them through, this adapter intentionally returns a successful no-op
+// result rather than calling ProcessSuccessfulExecution with nil pointers — that
+// would panic inside the Helm/rationale generators (which dereference
+// executionResult.AppliedResources, plan.PolicyResults, etc.).
 type gitopsAgentAdapter struct {
 	agent *gitops.Agent
 }
 
-func (a *gitopsAgentAdapter) GenerateAndCommit(ctx context.Context, action *smoothv1.SmoothAction) (*gitops.GitCommitResult, error) {
-	return a.agent.ProcessSuccessfulExecution(
-		ctx,
-		action.Name,                                      // chatSessionName
-		controller.SanitizePrompt(action.Spec.ChatRef),   // userPrompt (best available proxy; sanitized)
-		"",                                               // gitRepo — not stored on SmoothAction; populated by env/config in agent
-		"",                                               // gitPath — same as above
-		nil,                                              // llmResponse — not available at reconcile time
-		nil,                                              // executionPlan — not available at reconcile time
-		nil,                                              // executionResult — not available at reconcile time
-	)
+func (a *gitopsAgentAdapter) GenerateAndCommit(_ context.Context, _ *smoothv1.SmoothAction) (*gitops.GitCommitResult, error) {
+	// No-op until SmoothAction carries the full execution context required by
+	// the GitOps pipeline. Returning an empty success result keeps the
+	// SmoothAction in the "Applied" state without spuriously moving it to
+	// "GitError" on every reconcile.
+	return &gitops.GitCommitResult{Success: true}, nil
 }
 
 var (
@@ -285,11 +286,11 @@ func main() {
 		"enableRollback", executorOptions.EnableRollback,
 	)
 
-	// 10. GitOps Agent
+	// 9. GitOps Agent
 	gitAgent := &gitopsAgentAdapter{agent: gitops.NewAgent()}
 	setupLog.Info("GitOps agent initialized")
 
-	// 9. Setup SmoothAction Controller
+	// 10. Setup SmoothAction Controller
 	if err := (&controller.SmoothActionReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),

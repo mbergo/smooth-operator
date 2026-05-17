@@ -80,7 +80,13 @@ type PolicyResult struct {
 	SuggestedFix string
 }
 
-// NewEngine creates a new policy engine with default policies
+// NewEngine creates a new policy engine with default policies.
+//
+// LoadBalancerInternalAnnotationPolicy is intentionally NOT included by
+// default — it requires cloud-provider-specific configuration, and registering
+// it unconditionally would reject every public LoadBalancer Service on
+// clusters that don't use the supported annotation conventions. Callers that
+// need it can register it explicitly via AddPolicy.
 func NewEngine() *Engine {
 	return &Engine{
 		policies: []Policy{
@@ -91,7 +97,6 @@ func NewEngine() *Engine {
 			&ImageRegistryPolicy{},
 			&HostPathPolicy{},
 			&PrivilegedContainerPolicy{},
-			&LoadBalancerInternalAnnotationPolicy{},
 		},
 	}
 }

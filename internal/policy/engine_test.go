@@ -116,6 +116,9 @@ func fullCompliantDeploymentSpec() map[string]interface{} {
 func TestEngine_EvaluateManifest(t *testing.T) {
 	ctx := context.Background()
 	engine := NewEngine()
+	// LoadBalancerInternalAnnotationPolicy is no longer a default policy
+	// (it's provider-specific); register it explicitly for the LB test cases.
+	engine.AddPolicy(&LoadBalancerInternalAnnotationPolicy{})
 
 	tests := []struct {
 		name           string

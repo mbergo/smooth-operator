@@ -57,8 +57,9 @@ type GitClient struct {
 // NewGitClient creates a new Git client
 func NewGitClient() *GitClient {
 	return &GitClient{
-		workDir:       "/tmp/smooth-operator-git",
-		httpClient:    http.DefaultClient,
+		workDir: "/tmp/smooth-operator-git",
+		// Bound PR/MR API calls so a stalled provider can't hang a reconcile.
+		httpClient:    &http.Client{Timeout: 30 * time.Second},
 		githubAPIBase: "https://api.github.com",
 		gitlabAPIBase: "https://gitlab.com/api/v4",
 	}
@@ -298,10 +299,10 @@ func (g *GitClient) createPullRequest(ctx context.Context, options GitOptions, b
 	}
 
 	switch {
-	case info.host == "gitlab.com" || strings.HasSuffix(info.host, ".gitlab.com"):
+	case isGitLabHost(info.host):
 		return g.createGitLabMR(ctx, info, branch, base, title, body)
 	default:
-		// Treat everything else as GitHub (including GHE)
+		// Treat everything else as GitHub (including GHE).
 		token := os.Getenv("GITHUB_TOKEN")
 		if token == "" {
 			logger.Info("GITHUB_TOKEN not set; skipping PR creation")
@@ -316,6 +317,19 @@ func (g *GitClient) createPullRequest(ctx context.Context, options GitOptions, b
 		}
 		return pr.URL, nil
 	}
+}
+
+// isGitLabHost reports whether the given host should be routed through the
+// GitLab MR API. It recognizes gitlab.com, *.gitlab.com, and any host whose
+// label contains "gitlab" (covering self-hosted instances such as
+// gitlab.acme.internal or gitlab-ee.example.com).
+func isGitLabHost(host string) bool {
+	h := strings.ToLower(host)
+	if h == "gitlab.com" || strings.HasSuffix(h, ".gitlab.com") {
+		return true
+	}
+	// Match self-hosted GitLab whose hostname embeds "gitlab" (common convention).
+	return strings.Contains(h, "gitlab")
 }
 
 // createGitHubPR posts to the GitHub REST API and returns the PR URL and number.

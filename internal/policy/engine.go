@@ -80,7 +80,13 @@ type PolicyResult struct {
 	SuggestedFix string
 }
 
-// NewEngine creates a new policy engine with default policies
+// NewEngine creates a new policy engine with default policies.
+//
+// LoadBalancerInternalAnnotationPolicy is intentionally NOT included by
+// default — it requires cloud-provider-specific configuration, and registering
+// it unconditionally would reject every public LoadBalancer Service on
+// clusters that don't use the supported annotation conventions. Callers that
+// need it can register it explicitly via AddPolicy.
 func NewEngine() *Engine {
 	return &Engine{
 		policies: []Policy{
@@ -97,9 +103,9 @@ func NewEngine() *Engine {
 
 // EvaluateManifest runs all policies against a manifest
 func (e *Engine) EvaluateManifest(ctx context.Context, obj *unstructured.Unstructured, kind, name, namespace string) (*PolicyEvaluationResult, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
-	log.Info("Evaluating policies",
+	logger.Info("Evaluating policies",
 		"kind", kind,
 		"name", name,
 		"policyCount", len(e.policies),
@@ -131,7 +137,7 @@ func (e *Engine) EvaluateManifest(ctx context.Context, obj *unstructured.Unstruc
 				result.Passed = false
 			}
 
-			log.Info("Policy violation detected",
+			logger.Info("Policy violation detected",
 				"policy", policyResult.PolicyName,
 				"severity", policyResult.Severity,
 				"resource", fmt.Sprintf("%s/%s", kind, name),
@@ -140,12 +146,12 @@ func (e *Engine) EvaluateManifest(ctx context.Context, obj *unstructured.Unstruc
 	}
 
 	if result.Passed {
-		log.Info("All policies passed",
+		logger.Info("All policies passed",
 			"kind", kind,
 			"name", name,
 		)
 	} else {
-		log.Info("Policy violations found",
+		logger.Info("Policy violations found",
 			"kind", kind,
 			"name", name,
 			"blockingViolations", len(result.Violations),
@@ -159,3 +165,22 @@ func (e *Engine) EvaluateManifest(ctx context.Context, obj *unstructured.Unstruc
 func (e *Engine) AddPolicy(policy Policy) {
 	e.policies = append(e.policies, policy)
 }
+
+// AutoModeAllowed reports whether automatic application is permitted given a risk
+// level and confidence score. Auto-mode is allowed only when risk is "low" or
+// "med" AND confidence is at or above the minimum threshold (0.7 by default).
+//
+// The minConfidence parameter is typically DefaultMinConfidence (0.7). Pass a
+// negative value to use the default.
+func AutoModeAllowed(risk string, confidence float64, minConfidence float64) bool {
+	if minConfidence < 0 {
+		minConfidence = DefaultMinConfidence
+	}
+	if confidence < minConfidence {
+		return false
+	}
+	return risk == "low" || risk == "med"
+}
+
+// DefaultMinConfidence is the minimum LLM confidence score required for auto-mode.
+const DefaultMinConfidence = 0.7

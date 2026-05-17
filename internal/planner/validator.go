@@ -34,15 +34,15 @@ type ManifestValidator struct {
 }
 
 // NewManifestValidator creates a new validator
-func NewManifestValidator(client client.Client) *ManifestValidator {
+func NewManifestValidator(c client.Client) *ManifestValidator {
 	return &ManifestValidator{
-		client: client,
+		client: c,
 	}
 }
 
 // ValidateYAML parses and validates a YAML manifest
 func (v *ManifestValidator) ValidateYAML(ctx context.Context, yamlContent string) (*ValidatedManifest, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	// Parse YAML to unstructured object
 	obj := &unstructured.Unstructured{}
@@ -74,7 +74,7 @@ func (v *ManifestValidator) ValidateYAML(ctx context.Context, yamlContent string
 		if client.IgnoreNotFound(err) == nil {
 			// Resource doesn't exist - this is a new creation
 			validated.IsNew = true
-			log.Info("Manifest validated (new resource)",
+			logger.Info("Manifest validated (new resource)",
 				"kind", validated.Kind,
 				"name", validated.Name,
 			)
@@ -84,7 +84,7 @@ func (v *ManifestValidator) ValidateYAML(ctx context.Context, yamlContent string
 	} else {
 		// Resource exists - this is an update
 		validated.IsNew = false
-		log.Info("Manifest validated (update existing)",
+		logger.Info("Manifest validated (update existing)",
 			"kind", validated.Kind,
 			"name", validated.Name,
 		)
@@ -95,9 +95,9 @@ func (v *ManifestValidator) ValidateYAML(ctx context.Context, yamlContent string
 
 // PerformDryRun performs a server-side dry-run of the manifest
 func (v *ManifestValidator) PerformDryRun(ctx context.Context, manifest *ValidatedManifest) (*DryRunResult, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
-	log.Info("Performing dry-run validation",
+	logger.Info("Performing dry-run validation",
 		"kind", manifest.Kind,
 		"name", manifest.Name,
 	)
@@ -121,7 +121,7 @@ func (v *ManifestValidator) PerformDryRun(ctx context.Context, manifest *Validat
 		result.Success = false
 		result.Message = fmt.Sprintf("Dry-run failed: %v", err)
 		result.Errors = append(result.Errors, err.Error())
-		log.Error(err, "Dry-run validation failed",
+		logger.Error(err, "Dry-run validation failed",
 			"kind", manifest.Kind,
 			"name", manifest.Name,
 		)
@@ -130,7 +130,7 @@ func (v *ManifestValidator) PerformDryRun(ctx context.Context, manifest *Validat
 
 	result.Success = true
 	result.Message = "Dry-run passed successfully"
-	log.Info("Dry-run validation passed",
+	logger.Info("Dry-run validation passed",
 		"kind", manifest.Kind,
 		"name", manifest.Name,
 	)

@@ -55,7 +55,7 @@ func (r *RationaleGenerator) GenerateRationale(
 
 	// AI Analysis
 	doc.WriteString("## AI Analysis\n\n")
-	doc.WriteString(fmt.Sprintf("**LLM Model**: GPT-4 Turbo\n"))
+	doc.WriteString("**LLM Model**: GPT-4 Turbo\n")
 	doc.WriteString(fmt.Sprintf("**Confidence**: %.0f%%\n", llmResponse.Confidence*100))
 	doc.WriteString(fmt.Sprintf("**Risk Level**: %s\n\n", llmResponse.Risk))
 	doc.WriteString(fmt.Sprintf("**Explanation**: %s\n\n", llmResponse.Explanation))

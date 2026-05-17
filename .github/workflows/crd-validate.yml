@@ -1,0 +1,61 @@
+name: CRD Validation
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  crd-validate:
+    name: Validate CRDs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Cache Go modules and build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            bin/
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+
+      - name: Install kubeconform
+        run: go install github.com/yannh/kubeconform/cmd/kubeconform@latest
+
+      - name: Generate manifests
+        run: make manifests
+
+      - name: Validate CRDs
+        run: |
+          if [ -d "config/crd/bases" ] && ls config/crd/bases/*.yaml >/dev/null 2>&1; then
+            # CustomResourceDefinition schemas are bundled with kubeconform's
+            # default schema location, but the lookup uses the controller-runtime
+            # CRD output which embeds OpenAPI v3 schemas. Use strict mode and
+            # explicitly skip our project's CR kinds for the bases themselves
+            # since kubeconform validates the wrapper, not the embedded schemas.
+            kubeconform -strict -summary \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              config/crd/bases/*.yaml
+          fi
+
+      - name: Validate sample manifests
+        run: |
+          if [ -d "config/samples" ] && ls config/samples/*.yaml >/dev/null 2>&1; then
+            # Skip our project's own custom kinds — kubeconform doesn't have
+            # their schemas without converting the CRDs first.
+            kubeconform -strict -summary \
+              -skip ChatSession,SmoothAction \
+              -schema-location default \
+              config/samples/*.yaml
+          fi

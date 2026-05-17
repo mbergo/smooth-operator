@@ -53,9 +53,9 @@ func (a *Agent) ProcessSuccessfulExecution(
 	executionPlan *planner.Plan,
 	executionResult *executor.ExecutionResult,
 ) (*GitCommitResult, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
-	log.Info("Processing GitOps artifacts",
+	logger.Info("Processing GitOps artifacts",
 		"chatSession", chatSessionName,
 		"repo", gitRepo,
 		"path", gitPath,
@@ -68,7 +68,7 @@ func (a *Agent) ProcessSuccessfulExecution(
 		return nil, fmt.Errorf("failed to generate Helm chart: %w", err)
 	}
 
-	log.Info("Helm chart generated", "name", chart.Name, "files", len(chart.Files))
+	logger.Info("Helm chart generated", "name", chart.Name, "files", len(chart.Files))
 
 	// 2. Generate SMOOTH.md rationale
 	rationale := a.rationaleGenerator.GenerateRationale(
@@ -79,7 +79,7 @@ func (a *Agent) ProcessSuccessfulExecution(
 		executionResult,
 	)
 
-	log.Info("SMOOTH.md rationale generated", "length", len(rationale))
+	logger.Info("SMOOTH.md rationale generated", "length", len(rationale))
 
 	// 3. Commit to Git
 	gitOptions := GitOptions{
@@ -92,10 +92,10 @@ func (a *Agent) ProcessSuccessfulExecution(
 
 	commitResult, err := a.gitClient.CommitAndPush(ctx, gitOptions, chart, rationale, chatSessionName)
 	if err != nil {
-		return nil, fmt.Errorf("Git operations failed: %w", err)
+		return nil, fmt.Errorf("git operations failed: %w", err)
 	}
 
-	log.Info("GitOps processing complete",
+	logger.Info("GitOps processing complete",
 		"success", commitResult.Success,
 		"commitSHA", commitResult.CommitSHA,
 		"prURL", commitResult.PRURL,
@@ -107,7 +107,7 @@ func (a *Agent) ProcessSuccessfulExecution(
 // extractAppName gets app name from git path
 func extractAppName(gitPath string) string {
 	parts := []string{}
-	for _, part := range []rune(gitPath) {
+	for _, part := range gitPath {
 		if part == '/' {
 			parts = append(parts, string(part))
 		}

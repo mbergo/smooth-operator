@@ -19,7 +19,9 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,7 +33,33 @@ import (
 
 	smoothv1 "github.com/mbergo/smooth-operator/api/v1"
 	"github.com/mbergo/smooth-operator/internal/executor"
+	"github.com/mbergo/smooth-operator/internal/gitops"
 )
+
+// SanitizePrompt replaces newlines and control characters with spaces and
+// truncates the result to 200 runes to prevent log injection and oversized
+// prompts from user-supplied ChatRef values. Truncation is rune-aware so that
+// multi-byte UTF-8 characters are never split mid-codepoint.
+func SanitizePrompt(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
+	const maxRunes = 200
+	if runes := []rune(s); len(runes) > maxRunes {
+		s = string(runes[:maxRunes])
+	}
+	return s
+}
+
+// GitopsAgent is the interface the reconciler uses to persist applied changes to Git.
+// Implementations wrap the concrete gitops.Agent and adapt its method signatures to
+// what the reconciler has available (the SmoothAction resource).
+type GitopsAgent interface {
+	GenerateAndCommit(ctx context.Context, action *smoothv1.SmoothAction) (*gitops.GitCommitResult, error)
+}
 
 // SmoothActionReconciler reconciles a SmoothAction object
 type SmoothActionReconciler struct {
@@ -39,6 +67,7 @@ type SmoothActionReconciler struct {
 	Scheme   *runtime.Scheme
 	Executor *executor.Executor
 	Recorder record.EventRecorder
+	GitAgent GitopsAgent
 }
 
 // +kubebuilder:rbac:groups=smooth.smooth.k8s.io,resources=smoothactions,verbs=get;list;watch;create;update;patch;delete
@@ -64,7 +93,7 @@ func (r *SmoothActionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Fetch the SmoothAction instance
 	smoothAction := &smoothv1.SmoothAction{}
-	err := r.Client.Get(ctx, req.NamespacedName, smoothAction)
+	err := r.Get(ctx, req.NamespacedName, smoothAction)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Info("SmoothAction not found, ignoring")
@@ -83,10 +112,10 @@ func (r *SmoothActionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Initialize status if not set
 	if smoothAction.Status.State == "" {
 		if smoothAction.Spec.Mode == "auto" {
-			smoothAction.Status.State = "Proposed"
+			smoothAction.Status.State = stateProposed
 			r.Recorder.Event(smoothAction, "Normal", "Proposed", "SmoothAction proposed for auto-execution")
 		} else {
-			smoothAction.Status.State = "Proposed"
+			smoothAction.Status.State = stateProposed
 			r.Recorder.Event(smoothAction, "Normal", "Proposed", "SmoothAction proposed, awaiting approval")
 		}
 
@@ -98,7 +127,9 @@ func (r *SmoothActionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Check if already in terminal state
+	// Check if already in terminal state.
+	// "GitError" is intentionally excluded so that transient Git failures can be
+	// retried on the next requeue; it is a recoverable, non-terminal condition.
 	if smoothAction.Status.State == "Applied" ||
 		smoothAction.Status.State == "RolledBack" ||
 		smoothAction.Status.State == "Declined" ||
@@ -107,8 +138,20 @@ func (r *SmoothActionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
+	// Reset a previous transient Git failure back to "Proposed" so the
+	// execution block below can re-attempt the operation on this requeue.
+	if smoothAction.Status.State == "GitError" {
+		log.Info("Retrying after GitError; resetting state to Proposed")
+		smoothAction.Status.State = stateProposed
+		if statusErr := r.Status().Update(ctx, smoothAction); statusErr != nil {
+			log.Error(statusErr, "Failed to reset GitError state")
+			return ctrl.Result{}, statusErr
+		}
+		// Fall through to execute immediately on this same reconcile pass.
+	}
+
 	// SUGGEST MODE: Wait for approval
-	if smoothAction.Spec.Mode == "suggest" && smoothAction.Status.State == "Proposed" {
+	if smoothAction.Spec.Mode == "suggest" && smoothAction.Status.State == stateProposed {
 		if smoothAction.Spec.Approval.Required && smoothAction.Spec.Approval.ApprovedBy == "" {
 			log.Info("Waiting for approval (suggest mode)")
 			// Requeue to check for approval
@@ -125,24 +168,43 @@ func (r *SmoothActionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// AUTO MODE or APPROVED SUGGEST MODE: Execute
 	if (smoothAction.Spec.Mode == "auto" || smoothAction.Spec.Approval.ApprovedBy != "") &&
-		smoothAction.Status.State == "Proposed" {
+		smoothAction.Status.State == stateProposed {
 
 		log.Info("Executing SmoothAction", "mode", smoothAction.Spec.Mode)
 
-		// Phase 6: Update status with execution progress
+		// Update status: mark as Applied and record the timestamp.
 		smoothAction.Status.State = "Applied"
 		smoothAction.Status.AppliedAt = metav1.Now().Format(time.RFC3339)
-
-		// Phase 6: Add Git information (simulated for now)
-		// TODO: Integrate with GitOps agent for real Git operations
-		smoothAction.Status.Git = smoothv1.GitInfo{
-			Commit: "abc123def456", // Will come from GitOps agent
-			Branch: fmt.Sprintf("smooth/%s", smoothAction.Spec.ChatRef),
-			PRURL:  fmt.Sprintf("https://github.com/example/repo/pull/new/smooth/%s", smoothAction.Spec.ChatRef),
-		}
-
-		// Phase 6: Clear any previous errors
 		smoothAction.Status.Errors = []string{}
+
+		// Persist applied changes to Git via the GitOps agent when one is configured.
+		if r.GitAgent != nil {
+			commitResult, gitErr := r.GitAgent.GenerateAndCommit(ctx, smoothAction)
+			if gitErr != nil {
+				log.Error(gitErr, "GitOps agent failed; recording error and requeueing")
+				// Use "GitError" (not "Error") so the terminal-state guard does not
+				// short-circuit retries on the next requeue.
+				smoothAction.Status.State = "GitError"
+				smoothAction.Status.Errors = append(smoothAction.Status.Errors, fmt.Sprintf("git: %v", gitErr))
+				r.Recorder.Event(smoothAction, "Warning", "GitOpsFailed", gitErr.Error())
+
+				if statusErr := r.Status().Update(ctx, smoothAction); statusErr != nil {
+					log.Error(statusErr, "Failed to persist Error status")
+					return ctrl.Result{}, statusErr
+				}
+				// Requeue with backoff so a transient Git failure can be retried.
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+
+			smoothAction.Status.Git = smoothv1.GitInfo{
+				Commit: commitResult.CommitSHA,
+				Branch: commitResult.Branch,
+				PRURL:  commitResult.PRURL,
+			}
+			if len(commitResult.Errors) > 0 {
+				smoothAction.Status.Errors = append(smoothAction.Status.Errors, commitResult.Errors...)
+			}
+		}
 
 		r.Recorder.Event(smoothAction, "Normal", "Applied",
 			fmt.Sprintf("Successfully applied %d manifests", len(smoothAction.Spec.Patches)))

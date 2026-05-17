@@ -119,8 +119,8 @@ func (p *PrometheusClient) CollectMetrics(ctx context.Context, namespace, deploy
 		}, nil
 	}
 
-	log := log.FromContext(ctx)
-	log.Info("Collecting Prometheus metrics",
+	logger := log.FromContext(ctx)
+	logger.Info("Collecting Prometheus metrics",
 		"namespace", namespace,
 		"deployment", deployment,
 		"window", window.String(),
@@ -149,7 +149,7 @@ func (p *PrometheusClient) CollectMetrics(ctx context.Context, namespace, deploy
 		snapshot.Errors = append(snapshot.Errors, fmt.Sprintf("Request metrics: %v", err))
 	}
 
-	log.Info("Prometheus metrics collected",
+	logger.Info("Prometheus metrics collected",
 		"cpuAvg", snapshot.CPUUsageAverage,
 		"memAvg", snapshot.MemoryUsageAverage,
 		"rps", snapshot.RequestsPerSecond,
@@ -240,7 +240,7 @@ func (p *PrometheusClient) collectMemoryMetrics(ctx context.Context, snapshot *M
 }
 
 // collectRequestMetrics queries HTTP request metrics (if available)
-func (p *PrometheusClient) collectRequestMetrics(ctx context.Context, snapshot *MetricsSnapshot) error {
+func (p *PrometheusClient) collectRequestMetrics(ctx context.Context, snapshot *MetricsSnapshot) error { //nolint:unparam // error reserved for future query-failure surfacing
 	// Query: Requests per second (using common HTTP metrics)
 	// This assumes standard Prometheus HTTP metrics are available
 	query := fmt.Sprintf(

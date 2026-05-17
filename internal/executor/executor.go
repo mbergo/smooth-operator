@@ -35,20 +35,20 @@ type Executor struct {
 }
 
 // NewExecutor creates a new executor
-func NewExecutor(client client.Client, options ExecutorOptions) *Executor {
+func NewExecutor(c client.Client, options ExecutorOptions) *Executor {
 	return &Executor{
-		client:  client,
+		client:  c,
 		options: options,
-		watcher: NewRolloutWatcher(client, options),
+		watcher: NewRolloutWatcher(c, options),
 	}
 }
 
 // Execute applies a validated plan to the cluster
 func (e *Executor) Execute(ctx context.Context, plan *planner.Plan) (*ExecutionResult, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 	startTime := time.Now()
 
-	log.Info("Starting execution",
+	logger.Info("Starting execution",
 		"manifests", len(plan.Manifests),
 		"dryRunFirst", e.options.DryRunFirst,
 	)
@@ -65,13 +65,13 @@ func (e *Executor) Execute(ctx context.Context, plan *planner.Plan) (*ExecutionR
 	// Backup current state for potential rollback
 	backup, err := e.backupCurrentState(ctx, plan)
 	if err != nil {
-		log.Error(err, "Failed to backup current state")
+		logger.Error(err, "Failed to backup current state")
 		result.Warnings = append(result.Warnings, fmt.Sprintf("Backup failed: %v", err))
 	}
 
 	// Apply each manifest
 	for i, manifest := range plan.Manifests {
-		log.Info("Applying manifest",
+		logger.Info("Applying manifest",
 			"index", i+1,
 			"kind", manifest.Kind,
 			"name", manifest.Name,
@@ -83,11 +83,11 @@ func (e *Executor) Execute(ctx context.Context, plan *planner.Plan) (*ExecutionR
 			errMsg := fmt.Sprintf("Failed to apply %s/%s: %v", manifest.Kind, manifest.Name, err)
 			result.Errors = append(result.Errors, errMsg)
 			result.Success = false
-			log.Error(err, "Manifest application failed")
+			logger.Error(err, "Manifest application failed")
 
 			// Rollback if enabled
 			if e.options.EnableRollback && backup != nil {
-				log.Info("Triggering automatic rollback due to apply failure")
+				logger.Info("Triggering automatic rollback due to apply failure")
 				rollbackResult := e.rollback(ctx, backup, result.AppliedResources)
 				result.RolledBack = true
 				result.Warnings = append(result.Warnings, fmt.Sprintf("Rolled back %d resources", rollbackResult.RolledBackCount))
@@ -101,29 +101,29 @@ func (e *Executor) Execute(ctx context.Context, plan *planner.Plan) (*ExecutionR
 
 	// If no errors, watch rollouts for Deployments
 	if result.Success && len(result.AppliedResources) > 0 {
-		log.Info("Watching rollouts for applied Deployments")
-		
+		logger.Info("Watching rollouts for applied Deployments")
+
 		rolloutResults, err := e.watcher.WatchRollouts(ctx, result.AppliedResources)
 		if err != nil {
-			log.Error(err, "Rollout watching failed")
+			logger.Error(err, "Rollout watching failed")
 			result.Warnings = append(result.Warnings, fmt.Sprintf("Rollout watch error: %v", err))
 		}
-		
+
 		result.RolloutStatuses = rolloutResults
 
 		// Check if any rollouts failed
 		for _, rollout := range rolloutResults {
 			if rollout.State == "failed" || rollout.State == "timedout" {
 				result.Success = false
-				result.Errors = append(result.Errors, 
+				result.Errors = append(result.Errors,
 					fmt.Sprintf("Rollout failed for %s: %s", rollout.DeploymentName, rollout.State))
 
 				// Trigger rollback
 				if e.options.EnableRollback && backup != nil {
-					log.Info("Triggering automatic rollback due to rollout failure")
+					logger.Info("Triggering automatic rollback due to rollout failure")
 					rollbackResult := e.rollback(ctx, backup, result.AppliedResources)
 					result.RolledBack = true
-					result.Warnings = append(result.Warnings, 
+					result.Warnings = append(result.Warnings,
 						fmt.Sprintf("Rolled back %d resources due to rollout failure", rollbackResult.RolledBackCount))
 				}
 				break
@@ -133,7 +133,7 @@ func (e *Executor) Execute(ctx context.Context, plan *planner.Plan) (*ExecutionR
 
 	result.ExecutionTime = time.Since(startTime)
 
-	log.Info("Execution complete",
+	logger.Info("Execution complete",
 		"success", result.Success,
 		"applied", len(result.AppliedResources),
 		"errors", len(result.Errors),
@@ -146,7 +146,7 @@ func (e *Executor) Execute(ctx context.Context, plan *planner.Plan) (*ExecutionR
 
 // applyManifest applies a single manifest using server-side apply
 func (e *Executor) applyManifest(ctx context.Context, manifest *planner.ValidatedManifest) (*AppliedResource, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	obj := manifest.Object.DeepCopy()
 
@@ -160,7 +160,7 @@ func (e *Executor) applyManifest(ctx context.Context, manifest *planner.Validate
 	} else {
 		// Update existing resource using server-side apply
 		operation = "updated"
-		err = e.client.Patch(ctx, obj, client.Apply, 
+		err = e.client.Patch(ctx, obj, client.Apply,
 			client.ForceOwnership,
 			client.FieldOwner("smooth-operator"))
 	}
@@ -177,7 +177,7 @@ func (e *Executor) applyManifest(ctx context.Context, manifest *planner.Validate
 		AppliedAt: time.Now(),
 	}
 
-	log.Info("Manifest applied successfully",
+	logger.Info("Manifest applied successfully",
 		"kind", manifest.Kind,
 		"name", manifest.Name,
 		"operation", operation,
@@ -186,9 +186,11 @@ func (e *Executor) applyManifest(ctx context.Context, manifest *planner.Validate
 	return applied, nil
 }
 
-// backupCurrentState captures current state for potential rollback
-func (e *Executor) backupCurrentState(ctx context.Context, plan *planner.Plan) (*BackupState, error) {
-	log := log.FromContext(ctx)
+// backupCurrentState captures current state for potential rollback.
+// Returns an error in the signature for future use even though the current
+// implementation handles per-resource failures internally.
+func (e *Executor) backupCurrentState(ctx context.Context, plan *planner.Plan) (*BackupState, error) { //nolint:unparam // error reserved for future fail-fast behavior
+	logger := log.FromContext(ctx)
 
 	backup := &BackupState{
 		Resources: make(map[string]*unstructured.Unstructured),
@@ -211,7 +213,7 @@ func (e *Executor) backupCurrentState(ctx context.Context, plan *planner.Plan) (
 		}, existing)
 
 		if err != nil {
-			log.Error(err, "Failed to backup resource", "kind", manifest.Kind, "name", manifest.Name)
+			logger.Error(err, "Failed to backup resource", "kind", manifest.Kind, "name", manifest.Name)
 			continue
 		}
 
@@ -219,16 +221,16 @@ func (e *Executor) backupCurrentState(ctx context.Context, plan *planner.Plan) (
 		backup.Resources[key] = existing.DeepCopy()
 	}
 
-	log.Info("Backup created", "resources", len(backup.Resources))
+	logger.Info("Backup created", "resources", len(backup.Resources))
 	return backup, nil
 }
 
 // rollback restores previous state
 func (e *Executor) rollback(ctx context.Context, backup *BackupState, applied []AppliedResource) *RollbackResult {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 	startTime := time.Now()
 
-	log.Info("Performing rollback", "backupResources", len(backup.Resources), "appliedResources", len(applied))
+	logger.Info("Performing rollback", "backupResources", len(backup.Resources), "appliedResources", len(applied))
 
 	result := &RollbackResult{
 		Success:         true,
@@ -239,7 +241,8 @@ func (e *Executor) rollback(ctx context.Context, backup *BackupState, applied []
 	for _, appliedResource := range applied {
 		key := fmt.Sprintf("%s/%s/%s", appliedResource.Kind, appliedResource.Namespace, appliedResource.Name)
 
-		if appliedResource.Operation == "created" {
+		switch appliedResource.Operation {
+		case "created":
 			// Delete newly created resources
 			obj := &unstructured.Unstructured{}
 			obj.SetKind(appliedResource.Kind)
@@ -251,12 +254,12 @@ func (e *Executor) rollback(ctx context.Context, backup *BackupState, applied []
 				errMsg := fmt.Sprintf("Failed to delete %s: %v", key, err)
 				result.Errors = append(result.Errors, errMsg)
 				result.Success = false
-				log.Error(err, "Rollback delete failed", "resource", key)
+				logger.Error(err, "Rollback delete failed", "resource", key)
 			} else {
 				result.RolledBackCount++
-				log.Info("Rolled back (deleted)", "resource", key)
+				logger.Info("Rolled back (deleted)", "resource", key)
 			}
-		} else if appliedResource.Operation == "updated" {
+		case "updated":
 			// Restore previous state
 			if previousState, exists := backup.Resources[key]; exists {
 				err := e.client.Update(ctx, previousState)
@@ -264,10 +267,10 @@ func (e *Executor) rollback(ctx context.Context, backup *BackupState, applied []
 					errMsg := fmt.Sprintf("Failed to restore %s: %v", key, err)
 					result.Errors = append(result.Errors, errMsg)
 					result.Success = false
-					log.Error(err, "Rollback restore failed", "resource", key)
+					logger.Error(err, "Rollback restore failed", "resource", key)
 				} else {
 					result.RolledBackCount++
-					log.Info("Rolled back (restored)", "resource", key)
+					logger.Info("Rolled back (restored)", "resource", key)
 				}
 			}
 		}
@@ -275,7 +278,7 @@ func (e *Executor) rollback(ctx context.Context, backup *BackupState, applied []
 
 	result.RollbackTime = time.Since(startTime)
 
-	log.Info("Rollback complete",
+	logger.Info("Rollback complete",
 		"success", result.Success,
 		"rolledBack", result.RolledBackCount,
 		"errors", len(result.Errors),
@@ -284,4 +287,3 @@ func (e *Executor) rollback(ctx context.Context, backup *BackupState, applied []
 
 	return result
 }
-

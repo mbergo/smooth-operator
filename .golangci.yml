@@ -36,6 +36,15 @@ linters:
           - dupl
           - lll
         path: internal/*
+      # Repeated string literals in tests are usually fixture data, not
+      # candidates for shared constants — relax goconst/gocyclo there.
+      - linters:
+          - goconst
+          - gocyclo
+          - dupl
+          - lll
+          - errcheck
+        path: _test\.go
     paths:
       - third_party$
       - builtin$

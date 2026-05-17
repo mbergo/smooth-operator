@@ -15,7 +15,7 @@ Smooth Operator {{ .Chart.AppVersion }} installed in namespace {{ .Release.Names
 {{- if not .Values.operator.llmApiKeySecret }}
 
 WARNING: operator.llmApiKeySecret is unset. The operator will start but LLM
-inference will be disabled until a Secret containing LLM_API_KEY is referenced.
+inference will be disabled until a Secret containing ANTHROPIC_API_KEY is referenced.
 {{- end }}
 
 {{- if not .Values.operator.gitTokenSecret }}

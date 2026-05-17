@@ -109,13 +109,13 @@ metrics:
 
 # -- Configuration injected into the operator (env vars).
 operator:
-  # -- LLM provider: openai | azure.
-  llmProvider: openai
-  # -- LLM model name.
-  llmModel: gpt-4-turbo-preview
-  # -- Reference to a Secret holding the LLM API token under key LLM_API_KEY.
+  # -- LLM provider. Currently only "anthropic" is implemented.
+  llmProvider: anthropic
+  # -- Model ID. Defaults to claude-opus-4-7 (Opus 4.7).
+  llmModel: claude-opus-4-7
+  # -- Reference to a Secret holding the LLM API token under key ANTHROPIC_API_KEY.
   llmApiKeySecret: ""
-  # -- Reference to a Secret holding Git provider tokens (GITHUB_TOKEN / GITLAB_TOKEN).
+  # -- Reference to a Secret holding Git provider tokens (GITHUB_TOKEN / GITLAB_TOKEN / LOKI_TOKEN).
   gitTokenSecret: ""
   # -- Optional Loki base URL for log aggregation.
   lokiURL: ""
@@ -123,6 +123,8 @@ operator:
   prometheusURL: ""
   # -- Auto-mode default; per-ChatSession spec.preferAuto still wins.
   autoMode: false
+  # -- Effort level for Opus 4.7 (low | medium | high | xhigh | max). Default xhigh.
+  effort: xhigh
 
 # -- Extra environment variables (list of EnvVar).
 extraEnv: []

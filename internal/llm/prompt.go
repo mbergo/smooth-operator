@@ -17,187 +17,349 @@ limitations under the License.
 package llm
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/mbergo/smooth-operator/internal/collector"
 )
 
-// PromptBuilder constructs LLM prompts from aggregated context
-type PromptBuilder struct{}
+// Input size caps to defend against token-cost amplification + prompt injection
+// via overlong tenant-controlled fields. See security audit (HIGH).
+const (
+	maxUserPromptLen     = 4096
+	maxResourceNameLen   = 253
+	maxYAMLSnippetLen    = 2048
+	maxDeploymentsListed = 5
+	maxServicesListed    = 10
+	maxIngressesListed   = 10
+	maxGapNamesListed    = 20
+)
 
-// NewPromptBuilder creates a new prompt builder
-func NewPromptBuilder() *PromptBuilder {
-	return &PromptBuilder{}
+// sanitize strips control characters and truncates tenant-controlled strings
+// before they land in either prompt. Newlines collapse to spaces so a
+// malicious value cannot inject new structural lines into the prompt.
+func sanitize(s string, max int) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r == '\n' || r == '\r' || r == '\t' {
+			b.WriteByte(' ')
+			continue
+		}
+		if unicode.IsControl(r) {
+			continue
+		}
+		b.WriteRune(r)
+		if b.Len() >= max {
+			b.WriteString("...[truncated]")
+			break
+		}
+	}
+	return b.String()
 }
 
-// BuildPrompt creates a structured prompt for the LLM
-func (pb *PromptBuilder) BuildPrompt(
+// PromptBuilder constructs the two-stage prompt chain.
+//
+// Stage 1 (Reasoner): cluster YAML + metrics + policy summary -> ReasonerOutput
+//   - System prompt is stable across all sessions (cacheable)
+//   - Policy summary is stable per cluster (cacheable)
+//   - User message carries the volatile per-session payload
+//
+// Stage 2 (Generator): inferredNeeds + policy schema -> GeneratorOutput
+//   - System prompt is stable across all sessions (cacheable)
+//   - User message carries the needs JSON produced by Stage 1
+type PromptBuilder struct {
+	// PolicySummary is the cluster-stable constraint summary fed to the Reasoner.
+	// Inject via WithPolicySummary; defaults to the standard restricted-PSS rules.
+	PolicySummary string
+}
+
+// NewPromptBuilder creates a builder with default policy text.
+func NewPromptBuilder() *PromptBuilder {
+	return &PromptBuilder{PolicySummary: defaultPolicySummary}
+}
+
+// WithPolicySummary returns a copy with a custom policy summary block.
+func (pb *PromptBuilder) WithPolicySummary(s string) *PromptBuilder {
+	cp := *pb
+	cp.PolicySummary = s
+	return &cp
+}
+
+// ----------------------------------------------------------------------------
+// Stage 1: Reasoner
+// ----------------------------------------------------------------------------
+
+// BuildReasonerSystem returns the cacheable system prompt for stage 1.
+// Stable across every reconcile; safe to mark with cache_control.
+func (pb *PromptBuilder) BuildReasonerSystem() string {
+	return `You are Smooth Reasoner, a Kubernetes operations expert.
+
+YOUR ONLY JOB at this stage is to identify WHAT the workload needs.
+Do NOT produce YAML. Do NOT write manifests. A separate Generator handles that.
+
+Reason about the cluster state, metrics, and the user's prompt, then output a
+structured JSON describing inferred needs, overall risk, and confidence.
+
+OUTPUT SCHEMA (exact keys, no markdown, no prose around the JSON):
+{
+  "inferredNeeds": [
+    {
+      "type":     "HPA | Service-LB | Service-ClusterIP | Ingress | Probe | NetworkPolicy | PVC | PodSecurity | ResourceLimits | ConfigMap",
+      "reason":   "one sentence justifying this need from the evidence",
+      "priority": "low | med | high",
+      "spec":     "short hint (e.g. minReplicas=2 maxReplicas=10 cpu=70%)"
+    }
+  ],
+  "confidence": 0.0,
+  "risk": "low | med | high",
+  "explanation": "one paragraph summarising the reasoning"
+}
+
+RULES:
+- Output ONLY the JSON object. No markdown fences. No commentary.
+- Never invent secrets, tokens, or registry credentials.
+- Skip changes that would violate the supplied policy summary.
+- Set "risk" high if any change crosses namespace boundaries, exposes data
+  externally without TLS, or modifies cluster-scoped resources.
+- Set "confidence" honestly; below 0.5 means a human should review.
+- If nothing is needed, return inferredNeeds=[] with confidence=1.0 and risk=low.`
+}
+
+// BuildReasonerUser returns the per-session user message for stage 1.
+// Volatile (cluster state changes per reconcile); placed after cache breakpoint.
+func (pb *PromptBuilder) BuildReasonerUser(
 	userPrompt string,
 	aggregated *collector.AggregatedContext,
 ) string {
-	var prompt strings.Builder
+	var b strings.Builder
 
-	// System instructions
-	prompt.WriteString("You are Smooth Planner, a Kubernetes expert AI.\n\n")
-	prompt.WriteString("Your job: Analyze the cluster state and suggest improvements.\n\n")
-	prompt.WriteString("RULES:\n")
-	prompt.WriteString("1. Output ONLY valid JSON matching the schema\n")
-	prompt.WriteString("2. Never invent secrets or credentials\n")
-	prompt.WriteString("3. Prefer minimal, safe manifests\n")
-	prompt.WriteString("4. Justify every change with clear reasoning\n")
-	prompt.WriteString("5. Set confidence (0.0-1.0) and risk (low/med/high)\n\n")
+	b.WriteString("POLICY CONSTRAINTS:\n")
+	b.WriteString(pb.PolicySummary)
+	b.WriteString("\n\n")
 
-	// Expected JSON schema
-	prompt.WriteString("EXPECTED JSON SCHEMA:\n")
-	prompt.WriteString("```json\n")
-	prompt.WriteString(`{
-  "inferredNeeds": [
-    {
-      "type": "HPA|Service-LB|Ingress|Probe|NetworkPolicy|PVC",
-      "reason": "Why this is needed",
-      "priority": "low|med|high",
-      "spec": "Brief configuration suggestion"
-    }
-  ],
-  "patches": [
-    {
-      "kind": "Deployment|Service|HPA|Ingress",
-      "yaml": "Full YAML manifest"
-    }
-  ],
-  "confidence": 0.85,
-  "risk": "low|med|high",
-  "explanation": "Overall reasoning"
-}
-`)
-	prompt.WriteString("```\n\n")
+	// Tenant-controlled values are wrapped in XML-like delimiters so the model
+	// can distinguish them from operator-authored content. This blunts prompt
+	// injection: a value containing "RULES:" or "POLICY CONSTRAINTS:" is read
+	// as user data, not as new structural sections.
+	b.WriteString("<user_request>\n")
+	b.WriteString(sanitize(userPrompt, maxUserPromptLen))
+	b.WriteString("\n</user_request>\n\n")
 
-	// User's request
-	prompt.WriteString("═══════════════════════════════════════════════════════════\n")
-	prompt.WriteString("USER REQUEST:\n")
-	prompt.WriteString(fmt.Sprintf("%s\n", userPrompt))
-	prompt.WriteString("═══════════════════════════════════════════════════════════\n\n")
+	if aggregated == nil {
+		b.WriteString("<cluster_state available=\"false\"/>\n")
+		return b.String()
+	}
 
-	// Cluster context summary
-	prompt.WriteString("CLUSTER STATE:\n")
-	prompt.WriteString(fmt.Sprintf("Namespace: %s\n", aggregated.ClusterContext.TargetNamespace))
-	prompt.WriteString(aggregated.Summary.TextSummary)
-	prompt.WriteString("\n")
+	b.WriteString("<cluster_state>\n")
+	b.WriteString(fmt.Sprintf("namespace=%s\n",
+		sanitize(aggregated.ClusterContext.TargetNamespace, maxResourceNameLen)))
+	if aggregated.Summary.TextSummary != "" {
+		b.WriteString(aggregated.Summary.TextSummary)
+		b.WriteString("\n")
+	}
 
-	// Deployments
 	if len(aggregated.ClusterContext.Deployments) > 0 {
-		prompt.WriteString("\nDEPLOYMENTS:\n")
+		b.WriteString("\nDEPLOYMENTS:\n")
 		for i, dep := range aggregated.ClusterContext.Deployments {
-			if i >= 5 {
-				prompt.WriteString(fmt.Sprintf("... and %d more\n", len(aggregated.ClusterContext.Deployments)-5))
+			if i >= maxDeploymentsListed {
+				b.WriteString(fmt.Sprintf("... and %d more\n",
+					len(aggregated.ClusterContext.Deployments)-maxDeploymentsListed))
 				break
 			}
-			prompt.WriteString(fmt.Sprintf("\n%s (replicas: %d/%d):\n",
-				dep.Name, dep.ReadyReplicas, dep.Replicas))
+			b.WriteString(fmt.Sprintf("\n%s (replicas: %d/%d):\n",
+				sanitize(dep.Name, maxResourceNameLen),
+				dep.ReadyReplicas, dep.Replicas))
 			if dep.YAMLSnippet != "" {
-				prompt.WriteString(dep.YAMLSnippet)
-				prompt.WriteString("\n")
+				b.WriteString(sanitize(dep.YAMLSnippet, maxYAMLSnippetLen))
+				b.WriteString("\n")
 			}
 		}
 	}
 
-	// Services
 	if len(aggregated.ClusterContext.Services) > 0 {
-		prompt.WriteString("\nSERVICES:\n")
-		for _, svc := range aggregated.ClusterContext.Services {
-			prompt.WriteString(fmt.Sprintf("- %s (type: %s)\n", svc.Name, svc.Type))
+		b.WriteString("\nSERVICES:\n")
+		for i, svc := range aggregated.ClusterContext.Services {
+			if i >= maxServicesListed {
+				b.WriteString(fmt.Sprintf("... and %d more\n",
+					len(aggregated.ClusterContext.Services)-maxServicesListed))
+				break
+			}
+			b.WriteString(fmt.Sprintf("- %s (type: %s)\n",
+				sanitize(svc.Name, maxResourceNameLen),
+				sanitize(string(svc.Type), 32)))
 		}
-		prompt.WriteString("\n")
 	}
 
-	// Ingresses
 	if len(aggregated.ClusterContext.Ingresses) > 0 {
-		prompt.WriteString("\nINGRESSES:\n")
-		for _, ing := range aggregated.ClusterContext.Ingresses {
-			prompt.WriteString(fmt.Sprintf("- %s (rules: %d)\n", ing.Name, len(ing.Rules)))
+		b.WriteString("\nINGRESSES:\n")
+		for i, ing := range aggregated.ClusterContext.Ingresses {
+			if i >= maxIngressesListed {
+				b.WriteString(fmt.Sprintf("... and %d more\n",
+					len(aggregated.ClusterContext.Ingresses)-maxIngressesListed))
+				break
+			}
+			b.WriteString(fmt.Sprintf("- %s (rules: %d)\n",
+				sanitize(ing.Name, maxResourceNameLen),
+				len(ing.Rules)))
 		}
-		prompt.WriteString("\n")
 	}
 
-	// Metrics (if available)
 	if len(aggregated.MetricsSnapshots) > 0 {
-		prompt.WriteString("\nMETRICS:\n")
-		for name, metrics := range aggregated.MetricsSnapshots {
-			prompt.WriteString(fmt.Sprintf("- %s: CPU=%.2f, Memory=%.0fMB, RPS=%.1f, Errors=%.1f%%\n",
-				name,
-				metrics.CPUUsageAverage,
-				metrics.MemoryUsageAverage/1024/1024,
-				metrics.RequestsPerSecond,
-				metrics.ErrorRate))
+		b.WriteString("\nMETRICS (window):\n")
+		for name, m := range aggregated.MetricsSnapshots {
+			b.WriteString(fmt.Sprintf("- %s: cpu=%.2f mem=%.0fMB rps=%.1f err=%.1f%%\n",
+				sanitize(name, maxResourceNameLen),
+				m.CPUUsageAverage, m.MemoryUsageAverage/1024/1024,
+				m.RequestsPerSecond, m.ErrorRate))
 		}
-		prompt.WriteString("\n")
 	}
 
-	// Resource gaps
-	if len(aggregated.Summary.DeploymentsWithoutService) > 0 ||
-		len(aggregated.Summary.DeploymentsWithoutProbes) > 0 ||
-		len(aggregated.Summary.DeploymentsWithoutResources) > 0 {
-		prompt.WriteString("\nDETECTED GAPS:\n")
-		if len(aggregated.Summary.DeploymentsWithoutService) > 0 {
-			prompt.WriteString(fmt.Sprintf("- Deployments without Services: %s\n",
-				strings.Join(aggregated.Summary.DeploymentsWithoutService, ", ")))
-		}
-		if len(aggregated.Summary.DeploymentsWithoutProbes) > 0 {
-			prompt.WriteString(fmt.Sprintf("- Deployments without probes: %s\n",
-				strings.Join(aggregated.Summary.DeploymentsWithoutProbes, ", ")))
-		}
-		if len(aggregated.Summary.DeploymentsWithoutResources) > 0 {
-			prompt.WriteString(fmt.Sprintf("- Deployments without resource requests: %s\n",
-				strings.Join(aggregated.Summary.DeploymentsWithoutResources, ", ")))
-		}
-		prompt.WriteString("\n")
+	if hasGaps(aggregated) {
+		b.WriteString("\nDETECTED GAPS:\n")
+		writeGapLine(&b, "without Service", aggregated.Summary.DeploymentsWithoutService)
+		writeGapLine(&b, "without probes", aggregated.Summary.DeploymentsWithoutProbes)
+		writeGapLine(&b, "without resources", aggregated.Summary.DeploymentsWithoutResources)
 	}
 
-	// Performance issues
-	if len(aggregated.Summary.HighCPUDeployments) > 0 ||
-		len(aggregated.Summary.HighMemoryDeployments) > 0 ||
-		len(aggregated.Summary.HighErrorRates) > 0 {
-		prompt.WriteString("\nPERFORMANCE ISSUES:\n")
-		if len(aggregated.Summary.HighCPUDeployments) > 0 {
-			prompt.WriteString(fmt.Sprintf("- High CPU (>70%%): %s\n",
-				strings.Join(aggregated.Summary.HighCPUDeployments, ", ")))
-		}
-		if len(aggregated.Summary.HighMemoryDeployments) > 0 {
-			prompt.WriteString(fmt.Sprintf("- High Memory (>80%%): %s\n",
-				strings.Join(aggregated.Summary.HighMemoryDeployments, ", ")))
-		}
-		if len(aggregated.Summary.HighErrorRates) > 0 {
-			prompt.WriteString(fmt.Sprintf("- High Errors (>5%%): %s\n",
-				strings.Join(aggregated.Summary.HighErrorRates, ", ")))
-		}
-		prompt.WriteString("\n")
+	if hasPerf(aggregated) {
+		b.WriteString("\nPERFORMANCE SIGNALS:\n")
+		writeGapLine(&b, "high CPU (>70%)", aggregated.Summary.HighCPUDeployments)
+		writeGapLine(&b, "high memory (>80%)", aggregated.Summary.HighMemoryDeployments)
+		writeGapLine(&b, "high errors (>5%)", aggregated.Summary.HighErrorRates)
 	}
 
-	prompt.WriteString("═══════════════════════════════════════════════════════════\n")
-	prompt.WriteString("Based on the above, provide your JSON response with inferred needs and patches.\n")
-	prompt.WriteString("Remember: Output ONLY the JSON object, no extra text.\n")
-
-	return prompt.String()
+	b.WriteString("</cluster_state>\n\n")
+	b.WriteString("Return the ReasonerOutput JSON now.")
+	return b.String()
 }
 
-// BuildSystemPrompt creates the system message for OpenAI
-func (pb *PromptBuilder) BuildSystemPrompt() string {
-	return `You are Smooth Planner, an expert Kubernetes operations AI assistant.
+// writeGapLine writes a sanitized, length-capped comma-joined list of names.
+func writeGapLine(b *strings.Builder, label string, names []string) {
+	if len(names) == 0 {
+		return
+	}
+	cleaned := make([]string, 0, len(names))
+	for i, n := range names {
+		if i >= maxGapNamesListed {
+			cleaned = append(cleaned, fmt.Sprintf("...(+%d more)", len(names)-maxGapNamesListed))
+			break
+		}
+		cleaned = append(cleaned, sanitize(n, maxResourceNameLen))
+	}
+	b.WriteString(fmt.Sprintf("- %s: %s\n", label, strings.Join(cleaned, ", ")))
+}
 
-Your responsibilities:
-1. Analyze Kubernetes cluster state and metrics
-2. Identify missing or suboptimal configurations
-3. Suggest safe, production-ready improvements
-4. Generate valid Kubernetes YAML manifests
+// ----------------------------------------------------------------------------
+// Stage 2: Generator
+// ----------------------------------------------------------------------------
 
-Guidelines:
-- Always output valid JSON matching the expected schema
-- Never invent secrets, passwords, or credentials
-- Prefer conservative, safe changes
-- Provide clear explanations for all suggestions
-- Set realistic confidence scores (0.0 to 1.0)
-- Mark high-risk changes explicitly
+// BuildGeneratorSystem returns the cacheable system prompt for stage 2.
+// Stable across every session; safe to mark with cache_control.
+func (pb *PromptBuilder) BuildGeneratorSystem() string {
+	return `You are Smooth Generator, a Kubernetes manifest author.
 
-Output format: JSON only, no markdown, no extra text.`
+Stage 1 (Reasoner) has already decided WHAT is needed. Your job: produce the
+exact Kubernetes manifests that satisfy each inferred need.
+
+OUTPUT SCHEMA (exact keys, no markdown, no prose):
+{
+  "patches": [
+    {"kind": "Deployment|Service|HorizontalPodAutoscaler|Ingress|ConfigMap|NetworkPolicy|PersistentVolumeClaim",
+     "yaml": "complete YAML document as a string"}
+  ],
+  "notes": "optional one-paragraph caveats"
+}
+
+RULES:
+- Output ONLY the JSON object. No markdown fences. No commentary.
+- Each YAML must be self-contained and apply cleanly with kubectl apply -f -.
+- Always include apiVersion, kind, metadata.name, metadata.namespace.
+- Use the same namespace, labels, and selectors as the existing workload.
+- Never inline secrets; reference Secrets by name via valueFrom.secretKeyRef.
+- Respect the policy summary the Reasoner used:
+  * runAsNonRoot: true; readOnlyRootFilesystem; drop all capabilities
+  * LoadBalancer Services include the internal annotation unless explicitly external
+  * Resource requests + limits on every container
+  * Liveness + readiness probes on every container
+  * Image registry must match the allowlist
+- One patch per inferred need. Skip needs you cannot satisfy safely and explain
+  in "notes".
+- If the inferredNeeds array is empty, return patches=[] and notes="no changes needed".`
+}
+
+// BuildGeneratorUser returns the per-session user message for stage 2.
+// Carries the Reasoner output as JSON plus the original prompt and namespace.
+//
+// SECURITY: the Reasoner's free-text Explanation is intentionally stripped
+// before serialisation — it is model narrative, not authoritative cluster
+// fact, and feeding it back risks compounding hallucinations. The Generator
+// receives only the structured InferredNeeds + Risk + Confidence.
+func (pb *PromptBuilder) BuildGeneratorUser(
+	userPrompt string,
+	namespace string,
+	reasoner *ReasonerOutput,
+) string {
+	// Forward only structured fields; drop Explanation.
+	forwarded := struct {
+		InferredNeeds []InferredNeed `json:"inferredNeeds"`
+		Confidence    float64        `json:"confidence"`
+		Risk          string         `json:"risk"`
+	}{
+		InferredNeeds: reasoner.InferredNeeds,
+		Confidence:    reasoner.Confidence,
+		Risk:          reasoner.Risk,
+	}
+	needsJSON, err := json.MarshalIndent(forwarded, "", "  ")
+	if err != nil {
+		needsJSON = []byte(`{"inferredNeeds":[],"confidence":0,"risk":"high"}`)
+	}
+
+	return fmt.Sprintf(`<user_request>
+%s
+</user_request>
+
+<target_namespace>%s</target_namespace>
+
+<reasoner_output>
+%s
+</reasoner_output>
+
+POLICY CONSTRAINTS:
+%s
+
+Produce the GeneratorOutput JSON now. Every manifest's metadata.namespace MUST equal the target_namespace value above.`,
+		sanitize(userPrompt, maxUserPromptLen),
+		sanitize(namespace, maxResourceNameLen),
+		string(needsJSON),
+		pb.PolicySummary,
+	)
+}
+
+// ----------------------------------------------------------------------------
+// Defaults + helpers
+// ----------------------------------------------------------------------------
+
+const defaultPolicySummary = `- Allowed image registries: docker.io/library, ghcr.io, gcr.io, k8s.gcr.io, quay.io, registry.k8s.io
+- Pod security: runAsNonRoot=true, allowPrivilegeEscalation=false, privileged=false (container-level securityContext), drop=[ALL], readOnlyRootFilesystem=true, seccompProfile=RuntimeDefault
+- LoadBalancer Services: must carry service.beta.kubernetes.io/aws-load-balancer-internal annotation unless external exposure is explicitly requested
+- Resource limits and requests required on every container (blocking policy)
+- Liveness and readiness probes recommended on every container (warning policy)
+- No hostPath volumes (blocking)
+- No hostNetwork, no hostPID
+- NetworkPolicy default-deny preferred for new namespaces
+- TLS required on every Ingress; cert-manager annotations preferred
+- Allowed Kinds: Deployment, Service, HorizontalPodAutoscaler, Ingress, ConfigMap, NetworkPolicy, PersistentVolumeClaim — NEVER ClusterRole, ClusterRoleBinding, Namespace, MutatingWebhookConfiguration, ValidatingWebhookConfiguration, CustomResourceDefinition`
+
+func hasGaps(a *collector.AggregatedContext) bool {
+	return len(a.Summary.DeploymentsWithoutService) > 0 ||
+		len(a.Summary.DeploymentsWithoutProbes) > 0 ||
+		len(a.Summary.DeploymentsWithoutResources) > 0
+}
+
+func hasPerf(a *collector.AggregatedContext) bool {
+	return len(a.Summary.HighCPUDeployments) > 0 ||
+		len(a.Summary.HighMemoryDeployments) > 0 ||
+		len(a.Summary.HighErrorRates) > 0
 }

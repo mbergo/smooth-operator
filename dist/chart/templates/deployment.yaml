@@ -65,11 +65,15 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- with .Values.operator.llmApiKeySecret }}
-            - name: LLM_API_KEY
+            - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ . }}
-                  key: LLM_API_KEY
+                  key: ANTHROPIC_API_KEY
+            {{- end }}
+            {{- with .Values.operator.effort }}
+            - name: LLM_EFFORT
+              value: {{ . | quote }}
             {{- end }}
             {{- with .Values.operator.gitTokenSecret }}
             - name: GITHUB_TOKEN

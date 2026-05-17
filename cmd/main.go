@@ -253,7 +253,7 @@ func main() {
 	if llmClient.IsEnabled() {
 		setupLog.Info("LLM integration enabled", "model", llmOptions.Model)
 	} else {
-		setupLog.Info("LLM integration disabled (set OPENAI_API_KEY to enable)")
+		setupLog.Info("LLM integration disabled (set ANTHROPIC_API_KEY to enable)")
 	}
 
 	// 6. Policy & Planning Engine

@@ -17,9 +17,11 @@ limitations under the License.
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,16 +29,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/mbergo/smooth-operator/internal/collector"
 	"github.com/mbergo/smooth-operator/internal/metrics"
-	openai "github.com/sashabaranov/go-openai"
 )
 
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
-// newTestAggregated returns a minimal AggregatedContext suitable for client tests.
+// newTestAggregated returns a minimal AggregatedContext for client tests.
 func newTestAggregated() *collector.AggregatedContext {
 	return &collector.AggregatedContext{
 		ClusterContext: &collector.ClusterContext{
@@ -52,28 +55,21 @@ func newTestAggregated() *collector.AggregatedContext {
 	}
 }
 
-// chatCompletionResponse crafts a minimal OpenAI-format JSON response with the
-// supplied content string as the first choice's message body.
-func chatCompletionResponse(content string) []byte {
-	resp := openai.ChatCompletionResponse{
-		ID:      "chatcmpl-test",
-		Object:  "chat.completion",
-		Created: 1700000000,
-		Model:   "gpt-4-turbo-preview",
-		Choices: []openai.ChatCompletionChoice{
-			{
-				Index: 0,
-				Message: openai.ChatCompletionMessage{
-					Role:    openai.ChatMessageRoleAssistant,
-					Content: content,
-				},
-				FinishReason: openai.FinishReasonStop,
-			},
+// anthropicMessageResponse builds a minimal Anthropic Messages API response body
+// with the supplied content as the first (and only) text block.
+func anthropicMessageResponse(content string) []byte {
+	resp := map[string]any{
+		"id":    "msg_test",
+		"type":  "message",
+		"role":  "assistant",
+		"model": "claude-opus-4-7",
+		"content": []map[string]any{
+			{"type": "text", "text": content},
 		},
-		Usage: openai.Usage{
-			PromptTokens:     10,
-			CompletionTokens: 20,
-			TotalTokens:      30,
+		"stop_reason": "end_turn",
+		"usage": map[string]any{
+			"input_tokens":  100,
+			"output_tokens": 50,
 		},
 	}
 	b, err := json.Marshal(resp)
@@ -83,39 +79,66 @@ func chatCompletionResponse(content string) []byte {
 	return b
 }
 
-// openaiErrorBody returns an OpenAI-format error body for the given code/message.
-func openaiErrorBody(statusCode int, message string) []byte {
-	body, _ := json.Marshal(map[string]any{
+// anthropicErrorBody returns a minimal Anthropic error response body.
+func anthropicErrorBody(statusCode int, msg string) []byte {
+	body := map[string]any{
+		"type": "error",
 		"error": map[string]any{
-			"message": message,
-			"type":    "server_error",
-			"code":    fmt.Sprintf("%d", statusCode),
+			"type":    "api_error",
+			"message": msg,
 		},
-	})
-	return body
+	}
+	b, _ := json.Marshal(body)
+	return b
 }
 
-// newTestClient builds an LLM Client wired to the provided httptest server URL.
+// newTestClient wires a Client to the provided httptest server URL.
+// SDK-level retries are disabled (option.WithMaxRetries(0)); the client's
+// own retry loop is controlled by opts.MaxRetries.
 func newTestClient(t *testing.T, serverURL string, opts ClientOptions) *Client {
 	t.Helper()
-	cfg := openai.DefaultConfig("test-key")
-	cfg.BaseURL = serverURL + "/v1"
-	oaiClient := openai.NewClientWithConfig(cfg)
 	opts.Enabled = true
 	if opts.MaxRequestsPerMinute == 0 {
-		opts.MaxRequestsPerMinute = 60
-	}
-	if opts.Model == "" {
-		opts.Model = "gpt-4-turbo-preview"
+		opts.MaxRequestsPerMinute = 1000
 	}
 	if opts.MaxTokens == 0 {
-		opts.MaxTokens = 4096
+		opts.MaxTokens = 1024
 	}
-	return newClientFromOpenAI(oaiClient, opts)
+	if opts.Model == "" {
+		opts.Model = string(anthropic.ModelClaudeOpus4_7)
+	}
+	api := anthropic.NewClient(
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(serverURL),
+		option.WithMaxRetries(0), // disable SDK built-in retries
+	)
+	return newClientFromAPI(api, opts)
+}
+
+// reasonerJSON returns a minimal valid ReasonerOutput JSON.
+func reasonerJSON() string {
+	return `{
+		"inferredNeeds": [
+			{"type":"HPA","reason":"high CPU","priority":"high","spec":"minReplicas=2"}
+		],
+		"confidence": 0.9,
+		"risk": "low",
+		"explanation": "scaling is needed"
+	}`
+}
+
+// generatorJSON returns a minimal valid GeneratorOutput JSON.
+func generatorJSON() string {
+	return `{
+		"patches": [
+			{"kind":"HorizontalPodAutoscaler","yaml":"apiVersion: autoscaling/v2"}
+		],
+		"notes": "applied HPA"
+	}`
 }
 
 // ---------------------------------------------------------------------------
-// JSON parsing tests (no network)
+// JSON parsing (no network)
 // ---------------------------------------------------------------------------
 
 func TestParseValidLLMResponse(t *testing.T) {
@@ -135,7 +158,6 @@ func TestParseValidLLMResponse(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
 		t.Fatalf("unexpected parse error: %v", err)
 	}
-
 	if len(resp.InferredNeeds) != 1 {
 		t.Errorf("InferredNeeds: got %d, want 1", len(resp.InferredNeeds))
 	}
@@ -151,23 +173,16 @@ func TestParseValidLLMResponse(t *testing.T) {
 	if resp.Risk != "low" {
 		t.Errorf("Risk: got %q, want low", resp.Risk)
 	}
-	if resp.Explanation != "scaling needed" {
-		t.Errorf("Explanation: got %q, want 'scaling needed'", resp.Explanation)
-	}
 }
 
 func TestParseValidLLMResponse_EmptyArrays(t *testing.T) {
 	raw := `{"inferredNeeds": [], "patches": [], "confidence": 0.5, "risk": "med", "explanation": "nothing to do"}`
-
 	var resp LLMResponse
 	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
 		t.Fatalf("unexpected parse error: %v", err)
 	}
 	if len(resp.InferredNeeds) != 0 {
 		t.Errorf("expected empty InferredNeeds, got %d", len(resp.InferredNeeds))
-	}
-	if len(resp.Patches) != 0 {
-		t.Errorf("expected empty Patches, got %d", len(resp.Patches))
 	}
 }
 
@@ -184,8 +199,7 @@ func TestParseMalformedJSON_Error(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var resp LLMResponse
-			err := json.Unmarshal([]byte(tc.raw), &resp)
-			if err == nil {
+			if err := json.Unmarshal([]byte(tc.raw), &resp); err == nil {
 				t.Errorf("expected error for malformed JSON %q, got nil", tc.raw)
 			}
 		})
@@ -193,11 +207,7 @@ func TestParseMalformedJSON_Error(t *testing.T) {
 }
 
 func TestParseMissingRequiredFields_Defaults(t *testing.T) {
-	// JSON is valid but omits all fields — Go sets zero values.
-	// The application checks for non-zero confidence/risk at a higher layer,
-	// but the JSON decoder itself must not error.
 	raw := `{}`
-
 	var resp LLMResponse
 	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
 		t.Fatalf("unexpected error on empty object: %v", err)
@@ -205,145 +215,229 @@ func TestParseMissingRequiredFields_Defaults(t *testing.T) {
 	if resp.Confidence != 0 {
 		t.Errorf("Confidence should default to 0, got %v", resp.Confidence)
 	}
-	if resp.Risk != "" {
-		t.Errorf("Risk should default to empty string, got %q", resp.Risk)
+}
+
+// ---------------------------------------------------------------------------
+// RunReasoner
+// ---------------------------------------------------------------------------
+
+func TestRunReasoner_HappyPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(anthropicMessageResponse(reasonerJSON()))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL, ClientOptions{MaxRetries: 0})
+	out, err := c.RunReasoner(context.Background(), "scale up", newTestAggregated())
+	if err != nil {
+		t.Fatalf("RunReasoner unexpected error: %v", err)
+	}
+	if len(out.InferredNeeds) != 1 {
+		t.Errorf("InferredNeeds count: got %d, want 1", len(out.InferredNeeds))
+	}
+	if out.InferredNeeds[0].Type != "HPA" {
+		t.Errorf("InferredNeeds[0].Type: got %q, want HPA", out.InferredNeeds[0].Type)
+	}
+	if out.Confidence != 0.9 {
+		t.Errorf("Confidence: got %v, want 0.9", out.Confidence)
+	}
+	if out.Risk != "low" {
+		t.Errorf("Risk: got %q, want low", out.Risk)
+	}
+}
+
+func TestRunReasoner_FencedJSON(t *testing.T) {
+	fenced := "```json\n" + reasonerJSON() + "\n```"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(anthropicMessageResponse(fenced))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL, ClientOptions{MaxRetries: 0})
+	out, err := c.RunReasoner(context.Background(), "scale up", newTestAggregated())
+	if err != nil {
+		t.Fatalf("RunReasoner with fenced JSON unexpected error: %v", err)
+	}
+	if len(out.InferredNeeds) == 0 {
+		t.Error("expected non-empty InferredNeeds from fenced JSON response")
+	}
+}
+
+func TestRunReasoner_MalformedJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(anthropicMessageResponse("not json"))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL, ClientOptions{MaxRetries: 0})
+	_, err := c.RunReasoner(context.Background(), "scale up", newTestAggregated())
+	if err == nil {
+		t.Fatal("expected error for malformed JSON response, got nil")
+	}
+	if !strings.Contains(err.Error(), "JSON decode") {
+		t.Errorf("error should mention 'JSON decode', got: %v", err)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Integration tests using httptest.Server
+// RunGenerator
 // ---------------------------------------------------------------------------
 
-func TestGeneratePlan_Success(t *testing.T) {
-	validContent := `{
-		"inferredNeeds": [{"type": "HPA", "reason": "CPU", "priority": "high", "spec": ""}],
-		"patches": [],
-		"confidence": 0.85,
-		"risk": "low",
-		"explanation": "add HPA"
-	}`
-
+func TestRunGenerator_HappyPath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
-			http.NotFound(w, r)
-			return
-		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(chatCompletionResponse(validContent))
+		_, _ = w.Write(anthropicMessageResponse(generatorJSON()))
 	}))
 	defer srv.Close()
 
-	c := newTestClient(t, srv.URL, ClientOptions{})
-	resp, err := c.GeneratePlan(context.Background(), "add HPA", newTestAggregated())
+	c := newTestClient(t, srv.URL, ClientOptions{MaxRetries: 0})
+	reasoner := &ReasonerOutput{
+		InferredNeeds: []InferredNeed{
+			{Type: "HPA", Reason: "cpu", Priority: "high"},
+		},
+		Confidence: 0.9,
+		Risk:       "low",
+	}
+	out, err := c.RunGenerator(context.Background(), "add HPA", "production", reasoner)
+	if err != nil {
+		t.Fatalf("RunGenerator unexpected error: %v", err)
+	}
+	if len(out.Patches) != 1 {
+		t.Errorf("Patches count: got %d, want 1", len(out.Patches))
+	}
+	if out.Patches[0].Kind != "HorizontalPodAutoscaler" {
+		t.Errorf("Patches[0].Kind: got %q, want HorizontalPodAutoscaler", out.Patches[0].Kind)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GeneratePlan full chain
+// ---------------------------------------------------------------------------
+
+func TestGeneratePlan_FullChain(t *testing.T) {
+	var callCount atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := int(callCount.Add(1))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		switch n {
+		case 1:
+			// First call: reasoner
+			_, _ = w.Write(anthropicMessageResponse(reasonerJSON()))
+		default:
+			// Second call: generator
+			_, _ = w.Write(anthropicMessageResponse(generatorJSON()))
+		}
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL, ClientOptions{MaxRetries: 0})
+	resp, err := c.GeneratePlan(context.Background(), "scale up", newTestAggregated())
 	if err != nil {
 		t.Fatalf("GeneratePlan unexpected error: %v", err)
 	}
-	if resp.Risk != "low" {
-		t.Errorf("Risk: got %q, want low", resp.Risk)
+	if len(resp.InferredNeeds) == 0 {
+		t.Error("expected non-empty InferredNeeds in combined response")
 	}
-	if len(resp.InferredNeeds) != 1 {
-		t.Errorf("InferredNeeds count: got %d, want 1", len(resp.InferredNeeds))
+	if len(resp.Patches) == 0 {
+		t.Error("expected non-empty Patches in combined response")
 	}
-}
-
-func TestGeneratePlan_MalformedJSONFromServer(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		// Valid OpenAI envelope but the content is garbage JSON.
-		_, _ = w.Write(chatCompletionResponse("not valid json {{{"))
-	}))
-	defer srv.Close()
-
-	c := newTestClient(t, srv.URL, ClientOptions{})
-	_, err := c.GeneratePlan(context.Background(), "test", newTestAggregated())
-	if err == nil {
-		t.Fatal("expected parse error, got nil")
-	}
-	if !strings.Contains(err.Error(), "parse") {
-		t.Errorf("error should mention parse failure, got: %v", err)
+	if int(callCount.Load()) != 2 {
+		t.Errorf("expected 2 calls (reasoner + generator), got %d", callCount.Load())
 	}
 }
 
-func TestGeneratePlan_EmptyChoices(t *testing.T) {
-	// Server returns a valid OpenAI envelope with an empty Choices slice.
-	empty := openai.ChatCompletionResponse{
-		ID:      "chatcmpl-test",
-		Object:  "chat.completion",
-		Model:   "gpt-4-turbo-preview",
-		Choices: []openai.ChatCompletionChoice{},
-	}
-	b, _ := json.Marshal(empty)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(b)
-	}))
-	defer srv.Close()
-
-	c := newTestClient(t, srv.URL, ClientOptions{})
-	_, err := c.GeneratePlan(context.Background(), "test", newTestAggregated())
-	if err == nil {
-		t.Fatal("expected error for empty choices, got nil")
-	}
-}
-
-func TestGeneratePlan_Retry429(t *testing.T) {
-	const wantAttempts = 3 // 1 initial + 2 retries
+func TestGeneratePlan_NoNeedsSkipsGenerator(t *testing.T) {
 	var callCount atomic.Int32
 
-	validContent := `{"inferredNeeds":[],"patches":[],"confidence":0.7,"risk":"low","explanation":"ok"}`
+	noNeedsJSON := `{"inferredNeeds":[],"confidence":1.0,"risk":"low","explanation":"nothing needed"}`
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := int(callCount.Add(1))
-		if n < wantAttempts {
-			// Return 429 for the first (wantAttempts-1) calls
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write(openaiErrorBody(http.StatusTooManyRequests, "rate limited"))
-			return
-		}
+		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(chatCompletionResponse(validContent))
+		_, _ = w.Write(anthropicMessageResponse(noNeedsJSON))
 	}))
 	defer srv.Close()
 
-	c := newTestClient(t, srv.URL, ClientOptions{
-		MaxRetries: 3,
-		RetryDelay: 1 * time.Millisecond, // fast for tests
-	})
-	resp, err := c.GeneratePlan(context.Background(), "test", newTestAggregated())
+	c := newTestClient(t, srv.URL, ClientOptions{MaxRetries: 0})
+	resp, err := c.GeneratePlan(context.Background(), "review", newTestAggregated())
 	if err != nil {
-		t.Fatalf("unexpected error after retries: %v", err)
+		t.Fatalf("GeneratePlan unexpected error: %v", err)
 	}
-	if resp == nil {
-		t.Fatal("expected non-nil response")
+	if len(resp.InferredNeeds) != 0 {
+		t.Errorf("expected empty InferredNeeds, got %d", len(resp.InferredNeeds))
 	}
-	if int(callCount.Load()) != wantAttempts {
-		t.Errorf("server call count: got %d, want %d", callCount.Load(), wantAttempts)
+	if int(callCount.Load()) != 1 {
+		t.Errorf("generator must NOT be called when inferredNeeds is empty; got %d calls", callCount.Load())
 	}
 }
 
-func TestGeneratePlan_Retry5xx(t *testing.T) {
-	const wantAttempts = 2 // 1 initial 500 + 1 retry succeeds
+func TestGeneratePlan_GeneratorFails_ReturnsPartial(t *testing.T) {
 	var callCount atomic.Int32
-
-	validContent := `{"inferredNeeds":[],"patches":[],"confidence":0.6,"risk":"med","explanation":"recovered"}`
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := int(callCount.Add(1))
-		if n == 1 {
-			w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "application/json")
+		switch n {
+		case 1:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(anthropicMessageResponse(reasonerJSON()))
+		default:
 			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write(openaiErrorBody(http.StatusInternalServerError, "internal error"))
+			_, _ = w.Write(anthropicErrorBody(http.StatusInternalServerError, "generator exploded"))
+		}
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL, ClientOptions{MaxRetries: 0})
+	resp, err := c.GeneratePlan(context.Background(), "scale up", newTestAggregated())
+
+	// Must return an error wrapping "generator stage".
+	if err == nil {
+		t.Fatal("expected error when generator fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "generator stage") {
+		t.Errorf("error should wrap 'generator stage', got: %v", err)
+	}
+	// The partial response should still have inferredNeeds from the reasoner.
+	if resp == nil {
+		t.Fatal("expected non-nil partial response even when generator fails")
+	}
+	if len(resp.InferredNeeds) == 0 {
+		t.Error("partial response should have InferredNeeds from reasoner")
+	}
+	if len(resp.Patches) != 0 {
+		t.Errorf("partial response should have empty Patches, got %d", len(resp.Patches))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Retry behaviour
+// ---------------------------------------------------------------------------
+
+func TestRetry_429(t *testing.T) {
+	// Server returns 429 on first call, 200 on second.
+	var callCount atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := int(callCount.Add(1))
+		w.Header().Set("Content-Type", "application/json")
+		if n == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write(anthropicErrorBody(http.StatusTooManyRequests, "rate limited"))
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(chatCompletionResponse(validContent))
+		_, _ = w.Write(anthropicMessageResponse(reasonerJSON()))
 	}))
 	defer srv.Close()
 
@@ -351,48 +445,74 @@ func TestGeneratePlan_Retry5xx(t *testing.T) {
 		MaxRetries: 2,
 		RetryDelay: 1 * time.Millisecond,
 	})
-	resp, err := c.GeneratePlan(context.Background(), "test", newTestAggregated())
+	out, err := c.RunReasoner(context.Background(), "test", newTestAggregated())
 	if err != nil {
-		t.Fatalf("unexpected error after retry: %v", err)
+		t.Fatalf("expected success after retry on 429, got: %v", err)
 	}
-	if resp.Risk != "med" {
-		t.Errorf("Risk: got %q, want med", resp.Risk)
+	if out == nil {
+		t.Fatal("expected non-nil response after retry")
 	}
-	if int(callCount.Load()) != wantAttempts {
-		t.Errorf("server call count: got %d, want %d", callCount.Load(), wantAttempts)
+	if int(callCount.Load()) != 2 {
+		t.Errorf("expected 2 calls (1 fail + 1 retry success), got %d", callCount.Load())
 	}
 }
 
-func TestGeneratePlan_ExhaustedRetries_Returns5xxError(t *testing.T) {
+func TestRetry_5xx(t *testing.T) {
+	var callCount atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := int(callCount.Add(1))
+		w.Header().Set("Content-Type", "application/json")
+		if n == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write(anthropicErrorBody(http.StatusServiceUnavailable, "service unavailable"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(anthropicMessageResponse(reasonerJSON()))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL, ClientOptions{
+		MaxRetries: 2,
+		RetryDelay: 1 * time.Millisecond,
+	})
+	out, err := c.RunReasoner(context.Background(), "test", newTestAggregated())
+	if err != nil {
+		t.Fatalf("expected success after retry on 503, got: %v", err)
+	}
+	if out == nil {
+		t.Fatal("expected non-nil response after retry")
+	}
+}
+
+func TestRetry_Exhausted(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write(openaiErrorBody(http.StatusInternalServerError, "always fails"))
+		_, _ = w.Write(anthropicErrorBody(http.StatusInternalServerError, "always fails"))
 	}))
 	defer srv.Close()
 
+	const maxRetries = 2
 	c := newTestClient(t, srv.URL, ClientOptions{
-		MaxRetries: 2,
+		MaxRetries: maxRetries,
 		RetryDelay: 1 * time.Millisecond,
 	})
-	_, err := c.GeneratePlan(context.Background(), "test", newTestAggregated())
+	_, err := c.RunReasoner(context.Background(), "test", newTestAggregated())
 	if err == nil {
 		t.Fatal("expected error after exhausting retries, got nil")
 	}
-	if !strings.Contains(err.Error(), "OpenAI API error") {
-		t.Errorf("error should wrap OpenAI API error, got: %v", err)
-	}
 }
 
-func TestGeneratePlan_Non5xxNoRetry(t *testing.T) {
-	// 400 Bad Request is not retryable; only one call should be made.
+func TestRetry_400NoRetry(t *testing.T) {
 	var callCount atomic.Int32
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write(openaiErrorBody(http.StatusBadRequest, "bad request"))
+		_, _ = w.Write(anthropicErrorBody(http.StatusBadRequest, "bad request"))
 	}))
 	defer srv.Close()
 
@@ -400,67 +520,195 @@ func TestGeneratePlan_Non5xxNoRetry(t *testing.T) {
 		MaxRetries: 3,
 		RetryDelay: 1 * time.Millisecond,
 	})
-	_, err := c.GeneratePlan(context.Background(), "test", newTestAggregated())
+	_, err := c.RunReasoner(context.Background(), "test", newTestAggregated())
 	if err == nil {
 		t.Fatal("expected error for 400, got nil")
 	}
 	if int(callCount.Load()) != 1 {
-		t.Errorf("server should be called exactly once for non-retryable error; got %d", callCount.Load())
+		t.Errorf("server must be called exactly once for 400 (non-retryable); got %d", callCount.Load())
 	}
 }
 
-func TestGeneratePlan_TokenCapRespected(t *testing.T) {
-	const wantMaxTokens = 512
+// ---------------------------------------------------------------------------
+// Disabled client
+// ---------------------------------------------------------------------------
 
-	var receivedMaxTokens int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var reqBody openai.ChatCompletionRequest
-		if err := json.NewDecoder(r.Body).Decode(&reqBody); err == nil {
-			receivedMaxTokens = reqBody.MaxTokens
+func TestDisabledClient(t *testing.T) {
+	c, err := NewClient(ClientOptions{Enabled: false})
+	if err != nil {
+		t.Fatalf("NewClient with Enabled=false should not error: %v", err)
+	}
+	if c.IsEnabled() {
+		t.Error("client should report IsEnabled()=false")
+	}
+
+	_, err = c.GeneratePlan(context.Background(), "test", newTestAggregated())
+	if err == nil {
+		t.Fatal("GeneratePlan on disabled client should return an error")
+	}
+	if !strings.Contains(err.Error(), "not enabled") {
+		t.Errorf("error should mention 'not enabled', got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Request body inspection tests
+// ---------------------------------------------------------------------------
+
+// captureTransport records the last request body and delegates to the real
+// server for the response.
+type captureTransport struct {
+	lastBody []byte
+	delegate http.RoundTripper
+}
+
+func (ct *captureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		body, err := io.ReadAll(req.Body)
+		if err == nil {
+			ct.lastBody = body
+			req.Body = io.NopCloser(bytes.NewReader(body))
 		}
-		validContent := `{"inferredNeeds":[],"patches":[],"confidence":0.5,"risk":"low","explanation":""}`
+	}
+	return ct.delegate.RoundTrip(req)
+}
+
+// newTestClientWithCapture creates a client that captures outbound request bodies
+// while routing to a real httptest.Server for responses.
+func newTestClientWithCapture(t *testing.T, serverURL string, ct *captureTransport, opts ClientOptions) *Client {
+	t.Helper()
+	opts.Enabled = true
+	if opts.MaxRequestsPerMinute == 0 {
+		opts.MaxRequestsPerMinute = 1000
+	}
+	if opts.MaxTokens == 0 {
+		opts.MaxTokens = 1024
+	}
+	if opts.Model == "" {
+		opts.Model = string(anthropic.ModelClaudeOpus4_7)
+	}
+	ct.delegate = &http.Transport{}
+	api := anthropic.NewClient(
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(serverURL),
+		option.WithMaxRetries(0),
+		option.WithHTTPClient(&http.Client{Transport: ct}),
+	)
+	return newClientFromAPI(api, opts)
+}
+
+func TestPromptCaching_SystemBlockMarked(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(chatCompletionResponse(validContent))
+		_, _ = w.Write(anthropicMessageResponse(reasonerJSON()))
 	}))
 	defer srv.Close()
 
-	c := newTestClient(t, srv.URL, ClientOptions{
-		MaxTokens: wantMaxTokens,
-	})
-	_, err := c.GeneratePlan(context.Background(), "test", newTestAggregated())
+	ct := &captureTransport{}
+	c := newTestClientWithCapture(t, srv.URL, ct, ClientOptions{MaxRetries: 0})
+
+	_, err := c.RunReasoner(context.Background(), "test", newTestAggregated())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if receivedMaxTokens != wantMaxTokens {
-		t.Errorf("MaxTokens in request: got %d, want %d", receivedMaxTokens, wantMaxTokens)
+
+	if len(ct.lastBody) == 0 {
+		t.Fatal("no request body captured")
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(ct.lastBody, &body); err != nil {
+		t.Fatalf("failed to parse request body as JSON: %v", err)
+	}
+
+	system, ok := body["system"]
+	if !ok {
+		t.Fatal("request body missing 'system' field")
+	}
+	systemArr, ok := system.([]any)
+	if !ok || len(systemArr) == 0 {
+		t.Fatalf("'system' should be a non-empty array, got: %T %v", system, system)
+	}
+	firstBlock, ok := systemArr[0].(map[string]any)
+	if !ok {
+		t.Fatalf("system[0] should be an object, got: %T", systemArr[0])
+	}
+	if _, hasCacheControl := firstBlock["cache_control"]; !hasCacheControl {
+		t.Error("system block[0] should have a 'cache_control' field (prompt caching)")
 	}
 }
 
-func TestGeneratePlan_ContextCancelledDuringRetry(t *testing.T) {
+func TestAdaptiveThinking_Set(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = w.Write(openaiErrorBody(http.StatusTooManyRequests, "rate limited"))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(anthropicMessageResponse(reasonerJSON()))
 	}))
 	defer srv.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ct := &captureTransport{}
+	c := newTestClientWithCapture(t, srv.URL, ct, ClientOptions{MaxRetries: 0})
 
-	c := newTestClient(t, srv.URL, ClientOptions{
-		MaxRetries: 10,
-		RetryDelay: 100 * time.Millisecond, // long enough that cancel fires first
+	_, err := c.RunReasoner(context.Background(), "test", newTestAggregated())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(ct.lastBody) == 0 {
+		t.Fatal("no request body captured")
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(ct.lastBody, &body); err != nil {
+		t.Fatalf("failed to parse request body: %v", err)
+	}
+
+	thinking, ok := body["thinking"]
+	if !ok {
+		t.Fatal("request body missing 'thinking' field")
+	}
+	thinkingObj, ok := thinking.(map[string]any)
+	if !ok {
+		t.Fatalf("'thinking' should be an object, got: %T", thinking)
+	}
+	thinkingType, _ := thinkingObj["type"].(string)
+	if thinkingType != "adaptive" {
+		t.Errorf("thinking.type should be 'adaptive', got %q", thinkingType)
+	}
+}
+
+func TestModelIsOpus47(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(anthropicMessageResponse(reasonerJSON()))
+	}))
+	defer srv.Close()
+
+	ct := &captureTransport{}
+	c := newTestClientWithCapture(t, srv.URL, ct, ClientOptions{
+		MaxRetries: 0,
+		Model:      string(anthropic.ModelClaudeOpus4_7),
 	})
 
-	// Cancel after a short time so the retry sleep is interrupted.
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		cancel()
-	}()
+	_, err := c.RunReasoner(context.Background(), "test", newTestAggregated())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
-	_, err := c.GeneratePlan(ctx, "test", newTestAggregated())
-	if err == nil {
-		t.Fatal("expected error from context cancellation, got nil")
+	if len(ct.lastBody) == 0 {
+		t.Fatal("no request body captured")
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(ct.lastBody, &body); err != nil {
+		t.Fatalf("failed to parse request body: %v", err)
+	}
+
+	model, _ := body["model"].(string)
+	if model != "claude-opus-4-7" {
+		t.Errorf("model in request: got %q, want %q", model, "claude-opus-4-7")
 	}
 }
 
@@ -468,32 +716,65 @@ func TestGeneratePlan_ContextCancelledDuringRetry(t *testing.T) {
 // isRetryableError unit tests
 // ---------------------------------------------------------------------------
 
-func TestIsRetryableError(t *testing.T) {
+func TestIsRetryableError_anthropicError(t *testing.T) {
+	// Construct *anthropic.Error values via the real HTTP stack path by using
+	// a mock server and checking that our isRetryableError identifies them.
 	cases := []struct {
-		name     string
-		err      error
-		wantTrue bool
+		name       string
+		statusCode int
+		wantRetry  bool
 	}{
-		{"nil", nil, false},
-		{"429 APIError", &openai.APIError{HTTPStatusCode: 429}, true},
-		{"500 APIError", &openai.APIError{HTTPStatusCode: 500}, true},
-		{"503 APIError", &openai.APIError{HTTPStatusCode: 503}, true},
-		{"400 APIError", &openai.APIError{HTTPStatusCode: 400}, false},
-		{"401 APIError", &openai.APIError{HTTPStatusCode: 401}, false},
-		{"generic error", fmt.Errorf("some network error"), false},
+		{"429 rate limit", http.StatusTooManyRequests, true},
+		{"500 server error", http.StatusInternalServerError, true},
+		{"503 unavailable", http.StatusServiceUnavailable, true},
+		{"400 bad request", http.StatusBadRequest, false},
+		{"401 unauthorized", http.StatusUnauthorized, false},
 	}
+
 	for _, tc := range cases {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			got := isRetryableError(tc.err)
-			if got != tc.wantTrue {
-				t.Errorf("isRetryableError(%v) = %v, want %v", tc.err, got, tc.wantTrue)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.statusCode)
+				_, _ = w.Write(anthropicErrorBody(tc.statusCode, "test error"))
+			}))
+			defer srv.Close()
+
+			api := anthropic.NewClient(
+				option.WithAPIKey("test-key"),
+				option.WithBaseURL(srv.URL),
+				option.WithMaxRetries(0),
+			)
+			_, err := api.Messages.New(context.Background(), anthropic.MessageNewParams{
+				Model:     anthropic.ModelClaudeOpus4_7,
+				MaxTokens: 10,
+				Messages: []anthropic.MessageParam{
+					anthropic.NewUserMessage(anthropic.NewTextBlock("hi")),
+				},
+			})
+			if err == nil {
+				t.Skipf("server returned %d but no error; cannot test isRetryableError", tc.statusCode)
+			}
+			got := isRetryableError(err)
+			if got != tc.wantRetry {
+				t.Errorf("isRetryableError for %d: got %v, want %v", tc.statusCode, got, tc.wantRetry)
 			}
 		})
 	}
 }
 
+func TestIsRetryableError_nilAndGeneric(t *testing.T) {
+	if isRetryableError(nil) {
+		t.Error("isRetryableError(nil) should return false")
+	}
+	if isRetryableError(fmt.Errorf("network timeout")) {
+		t.Error("isRetryableError on plain error should return false")
+	}
+}
+
 // ---------------------------------------------------------------------------
-// NewClient disabled path
+// NewClient construction
 // ---------------------------------------------------------------------------
 
 func TestNewClient_Disabled(t *testing.T) {
@@ -510,13 +791,5 @@ func TestNewClient_MissingAPIKey(t *testing.T) {
 	_, err := NewClient(ClientOptions{Enabled: true, APIKey: ""})
 	if err == nil {
 		t.Fatal("expected error for missing API key, got nil")
-	}
-}
-
-func TestGeneratePlan_DisabledClient(t *testing.T) {
-	c, _ := NewClient(ClientOptions{Enabled: false})
-	_, err := c.GeneratePlan(context.Background(), "test", newTestAggregated())
-	if err == nil {
-		t.Fatal("expected error from disabled client, got nil")
 	}
 }

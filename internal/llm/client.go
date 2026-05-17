@@ -23,32 +23,33 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/mbergo/smooth-operator/internal/collector"
-	openai "github.com/sashabaranov/go-openai"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// Client handles communication with OpenAI API
+// Client orchestrates the two-stage Reasoner -> Generator chain against
+// Anthropic's Messages API.
 type Client struct {
-	client        *openai.Client
+	api           anthropic.Client
 	promptBuilder *PromptBuilder
-	model         string
-	maxTokens     int
-	temperature   float32
-	enabled       bool
 
-	// Retry configuration
-	maxRetries int
-	retryDelay time.Duration
+	model     anthropic.Model
+	maxTokens int64
+	effort    anthropic.OutputConfigEffort
+	enabled   bool
 
-	// Simple rate limiting
+	maxRetries  int
+	retryDelay  time.Duration
 	rateLimiter *RateLimiter
 }
 
-// RateLimiter implements a simple token bucket rate limiter
+// RateLimiter is a simple token bucket used to cap requests per minute.
 type RateLimiter struct {
 	mu         sync.Mutex
 	tokens     int
@@ -57,85 +58,112 @@ type RateLimiter struct {
 	lastRefill time.Time
 }
 
-// ClientOptions configures the LLM client
+// ClientOptions configures the Anthropic client.
 type ClientOptions struct {
-	APIKey      string
-	Model       string
-	MaxTokens   int
-	Temperature float32
-	Enabled     bool
+	APIKey    string
+	BaseURL   string // override for tests
+	Model     string
+	MaxTokens int64
+	Effort    anthropic.OutputConfigEffort
+	Enabled   bool
 
-	// Rate limiting
 	MaxRequestsPerMinute int
-
-	// Retry configuration (0 = no retries)
-	MaxRetries int
-	RetryDelay time.Duration
+	MaxRetries           int
+	RetryDelay           time.Duration
 }
 
-// DefaultClientOptions returns sensible defaults
+// DefaultClientOptions returns sensible defaults for Opus 4.7.
 func DefaultClientOptions() ClientOptions {
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	return ClientOptions{
-		APIKey:               os.Getenv("OPENAI_API_KEY"),
-		Model:                "gpt-4-turbo-preview",
-		MaxTokens:            4096,
-		Temperature:          0.3, // Lower for more consistent output
-		Enabled:              os.Getenv("OPENAI_API_KEY") != "",
+		APIKey:               apiKey,
+		Model:                string(anthropic.ModelClaudeOpus4_7),
+		MaxTokens:            16000,
+		Effort:               anthropic.OutputConfigEffortXhigh,
+		Enabled:              apiKey != "",
 		MaxRequestsPerMinute: 10,
 		MaxRetries:           3,
 		RetryDelay:           500 * time.Millisecond,
 	}
 }
 
-// NewClient creates a new LLM client
+// NewClient builds a Client. Returns a disabled client (no error) when
+// ANTHROPIC_API_KEY is empty so the operator can run in policy-only mode.
 func NewClient(options ClientOptions) (*Client, error) {
 	if !options.Enabled {
-		return &Client{
-			enabled: false,
-		}, nil
+		return &Client{enabled: false, promptBuilder: NewPromptBuilder()}, nil
 	}
-
 	if options.APIKey == "" {
-		return nil, fmt.Errorf("OpenAI API key is required (set OPENAI_API_KEY env var)")
+		return nil, fmt.Errorf("Anthropic API key is required (set ANTHROPIC_API_KEY env var)")
 	}
-
-	oaiClient := openai.NewClient(options.APIKey)
-	return newClientFromOpenAI(oaiClient, options), nil
+	opts := []option.RequestOption{option.WithAPIKey(options.APIKey)}
+	if options.BaseURL != "" {
+		opts = append(opts, option.WithBaseURL(options.BaseURL))
+	}
+	api := anthropic.NewClient(opts...)
+	return newClientFromAPI(api, options), nil
 }
 
-// newClientFromOpenAI constructs a Client from an already-configured openai.Client.
-// This is the shared construction path used by both NewClient and test helpers.
-func newClientFromOpenAI(oaiClient *openai.Client, options ClientOptions) *Client {
-	maxRetries := options.MaxRetries
-	if maxRetries <= 0 {
-		maxRetries = 0
+// newClientFromAPI shares the construction path between production and tests.
+func newClientFromAPI(api anthropic.Client, options ClientOptions) *Client {
+	retries := options.MaxRetries
+	if retries < 0 {
+		retries = 0
 	}
-	retryDelay := options.RetryDelay
-	if retryDelay <= 0 {
-		retryDelay = 500 * time.Millisecond
+	delay := options.RetryDelay
+	if delay <= 0 {
+		delay = 500 * time.Millisecond
 	}
-
-	rateLimiter := &RateLimiter{
-		tokens:     options.MaxRequestsPerMinute,
-		maxTokens:  options.MaxRequestsPerMinute,
-		refillRate: time.Minute / time.Duration(max(options.MaxRequestsPerMinute, 1)),
-		lastRefill: time.Now(),
+	effort := options.Effort
+	if effort == "" {
+		effort = anthropic.OutputConfigEffortXhigh
 	}
-
+	rpm := options.MaxRequestsPerMinute
+	if rpm <= 0 {
+		rpm = 10
+	}
+	model := anthropic.Model(options.Model)
+	if model == "" {
+		model = anthropic.ModelClaudeOpus4_7
+	}
+	maxTokens := options.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 16000
+	}
 	return &Client{
-		client:        oaiClient,
+		api:           api,
 		promptBuilder: NewPromptBuilder(),
-		model:         options.Model,
-		maxTokens:     options.MaxTokens,
-		temperature:   options.Temperature,
+		model:         model,
+		maxTokens:     maxTokens,
+		effort:        effort,
 		enabled:       true,
-		maxRetries:    maxRetries,
-		retryDelay:    retryDelay,
-		rateLimiter:   rateLimiter,
+		maxRetries:    retries,
+		retryDelay:    delay,
+		rateLimiter: &RateLimiter{
+			tokens:     rpm,
+			maxTokens:  rpm,
+			refillRate: time.Minute / time.Duration(maxInt(rpm, 1)),
+			lastRefill: time.Now(),
+		},
 	}
 }
 
-// GeneratePlan calls the LLM to generate a plan based on cluster context
+// IsEnabled reports whether the client will call the API.
+func (c *Client) IsEnabled() bool { return c.enabled }
+
+// PromptBuilder exposes the underlying builder so callers can inject custom
+// policy summaries.
+func (c *Client) PromptBuilder() *PromptBuilder { return c.promptBuilder }
+
+// ----------------------------------------------------------------------------
+// Public API
+// ----------------------------------------------------------------------------
+
+// GeneratePlan runs the full Reasoner -> Generator chain and returns the
+// combined LLMResponse expected by the planner. If the Generator fails but
+// the Reasoner succeeded, the returned response contains inferredNeeds + risk
+// + confidence and an empty Patches slice — the caller may still use it for
+// Suggest mode.
 func (c *Client) GeneratePlan(
 	ctx context.Context,
 	userPrompt string,
@@ -144,59 +172,147 @@ func (c *Client) GeneratePlan(
 	if !c.enabled {
 		return nil, fmt.Errorf("LLM client is not enabled")
 	}
+	logger := log.FromContext(ctx)
 
-	log := log.FromContext(ctx)
+	reasoner, err := c.RunReasoner(ctx, userPrompt, aggregated)
+	if err != nil {
+		return nil, fmt.Errorf("reasoner stage: %w", err)
+	}
 
-	// Rate limiting
+	ns := ""
+	if aggregated != nil {
+		ns = aggregated.ClusterContext.TargetNamespace
+	}
+
+	combined := &LLMResponse{
+		InferredNeeds: reasoner.InferredNeeds,
+		Confidence:    reasoner.Confidence,
+		Risk:          reasoner.Risk,
+		Explanation:   reasoner.Explanation,
+	}
+
+	// If the Reasoner found nothing to do, skip the Generator entirely.
+	if len(reasoner.InferredNeeds) == 0 {
+		logger.Info("Reasoner returned no inferred needs; skipping Generator stage")
+		return combined, nil
+	}
+
+	generator, err := c.RunGenerator(ctx, userPrompt, ns, reasoner)
+	if err != nil {
+		// Reasoner output is still useful for Suggest mode — return it but
+		// surface the Generator failure as a wrapped error so the caller can
+		// decide whether to apply.
+		logger.Error(err, "Generator stage failed; returning Reasoner output without patches")
+		return combined, fmt.Errorf("generator stage: %w", err)
+	}
+
+	combined.Patches = generator.Patches
+	if generator.Notes != "" {
+		if combined.Explanation == "" {
+			combined.Explanation = generator.Notes
+		} else {
+			combined.Explanation = combined.Explanation + "\n\nGenerator notes: " + generator.Notes
+		}
+	}
+	return combined, nil
+}
+
+// RunReasoner executes stage 1 only. Exported for direct testing.
+func (c *Client) RunReasoner(
+	ctx context.Context,
+	userPrompt string,
+	aggregated *collector.AggregatedContext,
+) (*ReasonerOutput, error) {
 	if err := c.rateLimiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("rate limit: %w", err)
 	}
 
-	log.Info("Generating LLM plan",
-		"model", c.model,
-		"namespace", aggregated.ClusterContext.TargetNamespace,
-		"deployments", len(aggregated.ClusterContext.Deployments),
-	)
+	system := c.promptBuilder.BuildReasonerSystem()
+	user := c.promptBuilder.BuildReasonerUser(userPrompt, aggregated)
 
-	// Build the prompt
-	systemPrompt := c.promptBuilder.BuildSystemPrompt()
-	userPromptText := c.promptBuilder.BuildPrompt(userPrompt, aggregated)
+	raw, usage, err := c.callMessages(ctx, "reasoner", system, user)
+	if err != nil {
+		return nil, err
+	}
 
-	log.V(1).Info("LLM prompt built", "systemPromptLength", len(systemPrompt), "userPromptLength", len(userPromptText))
+	var out ReasonerOutput
+	if err := decodeJSON(raw, &out); err != nil {
+		return nil, fmt.Errorf("reasoner JSON decode: %w (raw=%q)", err, truncate(raw, 512))
+	}
+	logUsage(ctx, "reasoner", usage)
+	return &out, nil
+}
 
-	req := openai.ChatCompletionRequest{
-		Model: c.model,
-		Messages: []openai.ChatCompletionMessage{
-			{
-				Role:    openai.ChatMessageRoleSystem,
-				Content: systemPrompt,
-			},
-			{
-				Role:    openai.ChatMessageRoleUser,
-				Content: userPromptText,
-			},
+// RunGenerator executes stage 2 only. Exported for direct testing.
+func (c *Client) RunGenerator(
+	ctx context.Context,
+	userPrompt string,
+	namespace string,
+	reasoner *ReasonerOutput,
+) (*GeneratorOutput, error) {
+	if err := c.rateLimiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit: %w", err)
+	}
+	system := c.promptBuilder.BuildGeneratorSystem()
+	user := c.promptBuilder.BuildGeneratorUser(userPrompt, namespace, reasoner)
+
+	raw, usage, err := c.callMessages(ctx, "generator", system, user)
+	if err != nil {
+		return nil, err
+	}
+
+	var out GeneratorOutput
+	if err := decodeJSON(raw, &out); err != nil {
+		return nil, fmt.Errorf("generator JSON decode: %w (raw=%q)", err, truncate(raw, 512))
+	}
+	logUsage(ctx, "generator", usage)
+	return &out, nil
+}
+
+// ----------------------------------------------------------------------------
+// Internals
+// ----------------------------------------------------------------------------
+
+// callMessages issues a single Messages.New request with prompt caching on the
+// system block + adaptive thinking + structured JSON output via Opus 4.7.
+func (c *Client) callMessages(
+	ctx context.Context,
+	stage string,
+	system string,
+	user string,
+) (string, anthropic.Usage, error) {
+	logger := log.FromContext(ctx).WithValues("stage", stage, "model", string(c.model))
+
+	adaptive := anthropic.ThinkingConfigAdaptiveParam{}
+	params := anthropic.MessageNewParams{
+		Model:     c.model,
+		MaxTokens: c.maxTokens,
+		System: []anthropic.TextBlockParam{{
+			Text:         system,
+			CacheControl: anthropic.NewCacheControlEphemeralParam(),
+		}},
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock(user)),
 		},
-		MaxTokens:   c.maxTokens,
-		Temperature: c.temperature,
-		ResponseFormat: &openai.ChatCompletionResponseFormat{
-			Type: openai.ChatCompletionResponseFormatTypeJSONObject,
+		Thinking: anthropic.ThinkingConfigParamUnion{OfAdaptive: &adaptive},
+		OutputConfig: anthropic.OutputConfigParam{
+			Effort: c.effort,
 		},
 	}
 
-	// Call OpenAI with retry on transient errors (429, 5xx)
-	startTime := time.Now()
-	var resp openai.ChatCompletionResponse
+	start := time.Now()
+	var resp *anthropic.Message
 	var err error
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
 		if attempt > 0 {
-			log.V(1).Info("Retrying LLM request", "attempt", attempt, "maxRetries", c.maxRetries)
+			logger.V(1).Info("retrying", "attempt", attempt, "max", c.maxRetries)
 			select {
 			case <-time.After(c.retryDelay):
 			case <-ctx.Done():
-				return nil, fmt.Errorf("context cancelled during retry: %w", ctx.Err())
+				return "", anthropic.Usage{}, fmt.Errorf("context cancelled during retry: %w", ctx.Err())
 			}
 		}
-		resp, err = c.client.CreateChatCompletion(ctx, req)
+		resp, err = c.api.Messages.New(ctx, params)
 		if err == nil {
 			break
 		}
@@ -204,72 +320,95 @@ func (c *Client) GeneratePlan(
 			break
 		}
 	}
-	duration := time.Since(startTime)
-
 	if err != nil {
-		log.Error(err, "LLM API call failed")
-		return nil, fmt.Errorf("OpenAI API error: %w", err)
+		logger.Error(err, "messages.new failed")
+		return "", anthropic.Usage{}, fmt.Errorf("anthropic messages.new: %w", err)
+	}
+	if resp == nil {
+		return "", anthropic.Usage{}, fmt.Errorf("anthropic messages.new: nil response")
 	}
 
-	if len(resp.Choices) == 0 {
-		return nil, fmt.Errorf("no response from LLM")
-	}
-
-	responseText := resp.Choices[0].Message.Content
-
-	log.Info("LLM response received",
-		"duration", duration.String(),
-		"tokensUsed", resp.Usage.TotalTokens,
-		"responseLength", len(responseText),
+	logger.V(1).Info("messages.new succeeded",
+		"duration", time.Since(start).String(),
+		"stopReason", string(resp.StopReason),
 	)
 
-	// Parse JSON response
-	var llmResp LLMResponse
-	if err := json.Unmarshal([]byte(responseText), &llmResp); err != nil {
-		log.Error(err, "Failed to parse LLM JSON response", "response", responseText)
-		return nil, fmt.Errorf("failed to parse LLM response: %w", err)
+	// Extract the first text block; thinking blocks are skipped.
+	text := extractText(resp)
+	if text == "" {
+		return "", resp.Usage, fmt.Errorf("anthropic messages.new: no text block in response")
 	}
+	return text, resp.Usage, nil
+}
 
-	log.Info("LLM plan generated successfully",
-		"inferredNeeds", len(llmResp.InferredNeeds),
-		"patches", len(llmResp.Patches),
-		"confidence", llmResp.Confidence,
-		"risk", llmResp.Risk,
+func extractText(msg *anthropic.Message) string {
+	var b strings.Builder
+	for _, block := range msg.Content {
+		switch v := block.AsAny().(type) {
+		case anthropic.TextBlock:
+			b.WriteString(v.Text)
+		}
+	}
+	return b.String()
+}
+
+// decodeJSON tolerates models that wrap output in ```json fences despite
+// the system prompt forbidding it.
+func decodeJSON(raw string, out any) error {
+	s := strings.TrimSpace(raw)
+	s = strings.TrimPrefix(s, "```json")
+	s = strings.TrimPrefix(s, "```")
+	s = strings.TrimSuffix(s, "```")
+	s = strings.TrimSpace(s)
+	return json.Unmarshal([]byte(s), out)
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+func logUsage(ctx context.Context, stage string, u anthropic.Usage) {
+	log.FromContext(ctx).V(1).Info("token usage",
+		"stage", stage,
+		"input", u.InputTokens,
+		"output", u.OutputTokens,
+		"cacheRead", u.CacheReadInputTokens,
+		"cacheCreation", u.CacheCreationInputTokens,
 	)
-
-	return &llmResp, nil
 }
 
-// IsEnabled returns whether the LLM client is enabled
-func (c *Client) IsEnabled() bool {
-	return c.enabled
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
-// isRetryableError reports whether an OpenAI API error is worth retrying.
-// Retryable conditions: rate-limit (429) and server errors (5xx).
+// isRetryableError reports whether an Anthropic API error is worth retrying.
+// Retryable: 429 (rate-limited) and 5xx (server errors).
 func isRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
-	var apiErr *openai.APIError
+	var apiErr *anthropic.Error
 	if errors.As(err, &apiErr) {
-		return apiErr.HTTPStatusCode == http.StatusTooManyRequests ||
-			apiErr.HTTPStatusCode >= http.StatusInternalServerError
-	}
-	var reqErr *openai.RequestError
-	if errors.As(err, &reqErr) {
-		return reqErr.HTTPStatusCode == http.StatusTooManyRequests ||
-			reqErr.HTTPStatusCode >= http.StatusInternalServerError
+		s := apiErr.StatusCode
+		return s == http.StatusTooManyRequests || s >= http.StatusInternalServerError
 	}
 	return false
 }
 
-// Wait blocks until a token is available (rate limiting)
+// Wait blocks until a token is available (rate limiting).
 func (rl *RateLimiter) Wait(ctx context.Context) error {
+	if rl == nil {
+		return nil
+	}
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
-	// Refill tokens based on time passed
 	now := time.Now()
 	elapsed := now.Sub(rl.lastRefill)
 	tokensToAdd := int(elapsed / rl.refillRate)
@@ -282,7 +421,6 @@ func (rl *RateLimiter) Wait(ctx context.Context) error {
 		rl.lastRefill = now
 	}
 
-	// If no tokens available, wait
 	if rl.tokens <= 0 {
 		waitTime := rl.refillRate - (elapsed % rl.refillRate)
 		select {

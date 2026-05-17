@@ -16,55 +16,54 @@ limitations under the License.
 
 package llm
 
-// InferredNeed represents a resource that the LLM determined is needed
+// InferredNeed represents a resource that the model determined is needed.
 type InferredNeed struct {
 	Type     string `json:"type"`     // HPA, Service-LB, Ingress, Probe, etc.
 	Reason   string `json:"reason"`   // Why this is needed
 	Priority string `json:"priority"` // low, med, high
-	Spec     string `json:"spec"`     // Suggested configuration (YAML)
+	Spec     string `json:"spec"`     // Suggested configuration (brief)
 }
 
-// PatchSuggestion represents a suggested Kubernetes manifest
+// PatchSuggestion represents a suggested Kubernetes manifest.
 type PatchSuggestion struct {
 	Kind string `json:"kind"` // Deployment, Service, HPA, etc.
 	YAML string `json:"yaml"` // Full YAML manifest
 }
 
-// LLMResponse represents the structured response from the LLM
+// ReasonerOutput is the structured result of stage 1 (Reasoner).
+// No YAML — pure inference + risk assessment.
+type ReasonerOutput struct {
+	InferredNeeds []InferredNeed `json:"inferredNeeds"`
+	Confidence    float64        `json:"confidence"` // 0.0 - 1.0
+	Risk          string         `json:"risk"`       // low, med, high
+	Explanation   string         `json:"explanation"`
+}
+
+// GeneratorOutput is the structured result of stage 2 (Generator).
+// Concrete K8s manifests for each inferred need.
+type GeneratorOutput struct {
+	Patches []PatchSuggestion `json:"patches"`
+	Notes   string            `json:"notes,omitempty"`
+}
+
+// LLMResponse is the combined result of the Reasoner -> Generator chain.
 type LLMResponse struct {
 	InferredNeeds []InferredNeed    `json:"inferredNeeds"`
 	Patches       []PatchSuggestion `json:"patches"`
-	Confidence    float64           `json:"confidence"` // 0.0 - 1.0
-	Risk          string            `json:"risk"`       // low, med, high
+	Confidence    float64           `json:"confidence"`
+	Risk          string            `json:"risk"`
 	Explanation   string            `json:"explanation"`
 }
 
-// PromptContext contains all context for building LLM prompts
+// PromptContext contains all context for building prompts.
 type PromptContext struct {
-	// User's natural language request
-	UserPrompt string
-
-	// Cluster context summary
+	UserPrompt     string
 	ClusterSummary string
-
-	// Deployment details (YAML snippets)
-	Deployments []string
-
-	// Service details
-	Services []string
-
-	// Ingress details
-	Ingresses []string
-
-	// Metrics snapshot (if available)
+	Deployments    []string
+	Services       []string
+	Ingresses      []string
 	MetricsSummary string
-
-	// Detected gaps
-	GapsSummary string
-
-	// Target namespace
-	Namespace string
-
-	// Chat session ID
-	ChatSessionID string
+	GapsSummary    string
+	Namespace      string
+	ChatSessionID  string
 }

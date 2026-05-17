@@ -23,7 +23,7 @@ helm install smooth-operator ./dist/chart \
 ## Prerequisites
 
 - Kubernetes 1.28+
-- A Secret in the release namespace containing `LLM_API_KEY` (referenced by
+- A Secret in the release namespace containing `ANTHROPIC_API_KEY` (referenced by
   `operator.llmApiKeySecret`).
 - Optional: a Secret containing `GITHUB_TOKEN`, `GITLAB_TOKEN`, and `LOKI_TOKEN`
   (referenced by `operator.gitTokenSecret`).
@@ -42,13 +42,14 @@ See `values.yaml` for the full set of tunables. Key fields:
 | `rbac.create` | `true` | Install ClusterRole + bindings |
 | `metrics.enabled` | `true` | Expose Prometheus metrics |
 | `leaderElection.enabled` | `true` | Enable leader election |
-| `operator.llmProvider` | `openai` | LLM backend |
-| `operator.llmModel` | `gpt-4-turbo-preview` | Model name |
-| `operator.llmApiKeySecret` | `""` | Secret with `LLM_API_KEY` |
+| `operator.llmProvider` | `anthropic` | LLM backend |
+| `operator.llmModel` | `claude-opus-4-7` | Model name |
+| `operator.llmApiKeySecret` | `""` | Secret containing `ANTHROPIC_API_KEY` |
 | `operator.gitTokenSecret` | `""` | Secret with provider tokens |
 | `operator.lokiURL` | `""` | Optional Loki base URL |
 | `operator.prometheusURL` | `""` | Optional Prometheus base URL |
 | `operator.autoMode` | `false` | Default auto-mode flag |
+| `operator.effort` | `xhigh` | Effort level for Opus 4.7 (low \| medium \| high \| xhigh \| max) |
 
 ## Uninstall
 

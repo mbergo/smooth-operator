@@ -24,9 +24,13 @@ import (
 	"github.com/mbergo/smooth-operator/internal/metrics"
 )
 
-// makeAggregated returns a minimal AggregatedContext for prompt tests.
-func makeAggregated(ns, userPrompt string) (*collector.AggregatedContext, string) {
-	agg := &collector.AggregatedContext{
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+// minimalAggregated builds a small but non-trivial AggregatedContext.
+func minimalAggregated(ns string) *collector.AggregatedContext {
+	return &collector.AggregatedContext{
 		ClusterContext: &collector.ClusterContext{
 			TargetNamespace: ns,
 			Deployments: []collector.DeploymentInfo{
@@ -38,25 +42,14 @@ func makeAggregated(ns, userPrompt string) (*collector.AggregatedContext, string
 					Containers: []collector.ContainerInfo{
 						{
 							Name:              "api-server",
-							Image:             "myrepo/api:v1.2.3",
-							RequestsCPU:       "100m",
-							RequestsMemory:    "128Mi",
+							Image:             "ghcr.io/org/api:v1",
+							RequestsCPU:       "200m",
+							RequestsMemory:    "256Mi",
 							HasReadinessProbe: true,
 							HasLivenessProbe:  true,
 						},
 					},
 					YAMLSnippet: "name: api-server",
-				},
-				{
-					Name:          "worker",
-					Replicas:      2,
-					ReadyReplicas: 1,
-					Labels:        map[string]string{"app": "worker"},
-					Containers: []collector.ContainerInfo{
-						{
-							Name: "worker",
-						},
-					},
 				},
 			},
 			Services: []collector.ServiceInfo{
@@ -66,183 +59,300 @@ func makeAggregated(ns, userPrompt string) (*collector.AggregatedContext, string
 				{Name: "api-ingress"},
 			},
 		},
-		MetricsSnapshots: map[string]*metrics.MetricsSnapshot{
-			"api-server": {
-				CPUUsageAverage:    0.8,
-				MemoryUsageAverage: 256 * 1024 * 1024,
-				RequestsPerSecond:  42.5,
-				ErrorRate:          0.5,
-			},
-		},
+		MetricsSnapshots: map[string]*metrics.MetricsSnapshot{},
 		Summary: collector.ContextSummary{
-			TotalDeployments:            2,
-			TotalServices:               1,
-			TotalIngresses:              1,
-			DeploymentsWithoutService:   []string{"worker"},
-			DeploymentsWithoutProbes:    []string{"worker"},
-			DeploymentsWithoutResources: []string{"worker"},
-			TextSummary:                 "Namespace contains 2 deployment(s).",
+			TextSummary: "Namespace contains 1 deployment(s).",
 		},
 	}
-	return agg, userPrompt
 }
 
-func TestBuildSystemPrompt(t *testing.T) {
+// ---------------------------------------------------------------------------
+// Stage 1: Reasoner system prompt
+// ---------------------------------------------------------------------------
+
+func TestBuildReasonerSystem(t *testing.T) {
 	pb := NewPromptBuilder()
-	sys := pb.BuildSystemPrompt()
+	sys := pb.BuildReasonerSystem()
 
 	checks := []struct {
 		name    string
 		snippet string
 	}{
-		{"kubernetes role", "Kubernetes"},
-		{"json output instruction", "JSON"},
-		{"no credentials rule", "credentials"},
-		{"confidence mention", "confidence"},
+		{"smooth reasoner identity", "Smooth Reasoner"},
+		{"output schema header", "OUTPUT SCHEMA"},
+		{"no yaml rule", "Do NOT produce YAML"},
+		{"confidence field", "confidence"},
+		{"risk field", "risk"},
+		{"inferredNeeds field", "inferredNeeds"},
 	}
 	for _, tc := range checks {
 		t.Run(tc.name, func(t *testing.T) {
 			if !strings.Contains(sys, tc.snippet) {
-				t.Errorf("system prompt missing %q; got:\n%s", tc.snippet, sys)
+				t.Errorf("reasoner system prompt missing %q", tc.snippet)
 			}
 		})
 	}
 }
 
-func TestBuildPrompt_UserPromptSection(t *testing.T) {
-	pb := NewPromptBuilder()
-	agg, userPrompt := makeAggregated("staging", "scale up the api-server")
+// ---------------------------------------------------------------------------
+// Stage 1: Reasoner user prompt
+// ---------------------------------------------------------------------------
 
-	prompt := pb.BuildPrompt(userPrompt, agg)
+func TestBuildReasonerUser_IncludesUserPrompt(t *testing.T) {
+	pb := NewPromptBuilder()
+	agg := minimalAggregated("staging")
+	prompt := pb.BuildReasonerUser("scale up the api-server", agg)
 
 	if !strings.Contains(prompt, "scale up the api-server") {
-		t.Errorf("prompt missing user_prompt text; got length=%d", len(prompt))
+		t.Errorf("reasoner user prompt missing user prompt text; len=%d", len(prompt))
 	}
-	if !strings.Contains(prompt, "USER REQUEST") {
-		t.Errorf("prompt missing USER REQUEST label")
+	if !strings.Contains(prompt, "<user_request>") {
+		t.Errorf("reasoner user prompt missing <user_request> delimiter")
 	}
 }
 
-func TestBuildPrompt_ClusterContext(t *testing.T) {
+func TestBuildReasonerUser_IncludesPolicySummary(t *testing.T) {
 	pb := NewPromptBuilder()
-	agg, up := makeAggregated("production", "add hpa")
+	agg := minimalAggregated("staging")
+	prompt := pb.BuildReasonerUser("test", agg)
 
-	prompt := pb.BuildPrompt(up, agg)
+	if !strings.Contains(prompt, "POLICY CONSTRAINTS") {
+		t.Errorf("reasoner user prompt missing POLICY CONSTRAINTS header")
+	}
+	// The default policy summary includes the image registry list.
+	if !strings.Contains(prompt, "docker.io") {
+		t.Errorf("reasoner user prompt missing default policy content (docker.io)")
+	}
+}
+
+func TestBuildReasonerUser_IncludesNamespace(t *testing.T) {
+	pb := NewPromptBuilder()
+	agg := minimalAggregated("production")
+	prompt := pb.BuildReasonerUser("review", agg)
+
+	if !strings.Contains(prompt, "production") {
+		t.Errorf("reasoner user prompt missing namespace 'production'")
+	}
+	if !strings.Contains(prompt, "<cluster_state>") {
+		t.Errorf("reasoner user prompt missing <cluster_state> delimiter")
+	}
+}
+
+func TestBuildReasonerUser_IncludesDeployments(t *testing.T) {
+	pb := NewPromptBuilder()
+	agg := minimalAggregated("test-ns")
+	prompt := pb.BuildReasonerUser("check deployments", agg)
+
+	if !strings.Contains(prompt, "api-server") {
+		t.Errorf("reasoner user prompt missing deployment name 'api-server'")
+	}
+	if !strings.Contains(prompt, "DEPLOYMENTS") {
+		t.Errorf("reasoner user prompt missing DEPLOYMENTS header")
+	}
+}
+
+func TestBuildReasonerUser_Truncates5PlusDeployments(t *testing.T) {
+	pb := NewPromptBuilder()
+	agg := &collector.AggregatedContext{
+		ClusterContext: &collector.ClusterContext{
+			TargetNamespace: "big-ns",
+		},
+		MetricsSnapshots: map[string]*metrics.MetricsSnapshot{},
+		Summary:          collector.ContextSummary{TextSummary: "many"},
+	}
+	for i := 0; i < 7; i++ {
+		agg.ClusterContext.Deployments = append(agg.ClusterContext.Deployments,
+			collector.DeploymentInfo{Name: strings.Repeat("d", i+1)})
+	}
+
+	prompt := pb.BuildReasonerUser("test", agg)
+
+	if !strings.Contains(prompt, "more") {
+		t.Errorf("reasoner user prompt should truncate >5 deployments with 'more' suffix")
+	}
+}
+
+func TestBuildReasonerUser_MissingAggregatedNil(t *testing.T) {
+	pb := NewPromptBuilder()
+	// Must not panic when aggregated is nil.
+	prompt := pb.BuildReasonerUser("test prompt", nil)
+
+	if !strings.Contains(prompt, `available="false"`) {
+		t.Errorf("nil aggregated should mark cluster_state available=false; got:\n%s", prompt)
+	}
+	// User prompt must still appear.
+	if !strings.Contains(prompt, "test prompt") {
+		t.Errorf("nil aggregated prompt missing user prompt text")
+	}
+}
+
+func TestBuildReasonerUser_Metrics(t *testing.T) {
+	pb := NewPromptBuilder()
+	agg := &collector.AggregatedContext{
+		ClusterContext: &collector.ClusterContext{
+			TargetNamespace: "metrics-ns",
+			Deployments: []collector.DeploymentInfo{
+				{Name: "web", Replicas: 2, ReadyReplicas: 2},
+			},
+		},
+		MetricsSnapshots: map[string]*metrics.MetricsSnapshot{
+			"web": {
+				CPUUsageAverage:    1.2,
+				MemoryUsageAverage: 512 * 1024 * 1024,
+				RequestsPerSecond:  99.9,
+				ErrorRate:          0.1,
+			},
+		},
+		Summary: collector.ContextSummary{TextSummary: "has metrics"},
+	}
+
+	prompt := pb.BuildReasonerUser("optimize", agg)
+
+	if !strings.Contains(prompt, "METRICS") {
+		t.Errorf("reasoner user prompt missing METRICS section when snapshots present")
+	}
+	if !strings.Contains(prompt, "web") {
+		t.Errorf("reasoner user prompt missing deployment name 'web' in metrics section")
+	}
+}
+
+func TestBuildReasonerUser_Gaps(t *testing.T) {
+	pb := NewPromptBuilder()
+	agg := &collector.AggregatedContext{
+		ClusterContext: &collector.ClusterContext{
+			TargetNamespace: "gap-ns",
+			Deployments: []collector.DeploymentInfo{
+				{Name: "worker", Replicas: 1, ReadyReplicas: 1},
+			},
+		},
+		MetricsSnapshots: map[string]*metrics.MetricsSnapshot{},
+		Summary: collector.ContextSummary{
+			TextSummary:                 "gaps present",
+			DeploymentsWithoutService:   []string{"worker"},
+			DeploymentsWithoutProbes:    []string{"worker"},
+			DeploymentsWithoutResources: []string{"worker"},
+		},
+	}
+
+	prompt := pb.BuildReasonerUser("review", agg)
+
+	if !strings.Contains(prompt, "DETECTED GAPS") {
+		t.Errorf("reasoner user prompt missing DETECTED GAPS section")
+	}
+	if !strings.Contains(prompt, "worker") {
+		t.Errorf("reasoner user prompt missing 'worker' in gaps section")
+	}
+}
+
+func TestBuildReasonerUser_Perf(t *testing.T) {
+	pb := NewPromptBuilder()
+	agg := &collector.AggregatedContext{
+		ClusterContext: &collector.ClusterContext{
+			TargetNamespace: "perf-ns",
+			Deployments: []collector.DeploymentInfo{
+				{Name: "hot-svc", Replicas: 2, ReadyReplicas: 2},
+			},
+		},
+		MetricsSnapshots: map[string]*metrics.MetricsSnapshot{},
+		Summary: collector.ContextSummary{
+			TextSummary:           "performance issues",
+			HighCPUDeployments:    []string{"hot-svc"},
+			HighMemoryDeployments: []string{"hot-svc"},
+		},
+	}
+
+	prompt := pb.BuildReasonerUser("scale", agg)
+
+	if !strings.Contains(prompt, "PERFORMANCE SIGNALS") {
+		t.Errorf("reasoner user prompt missing PERFORMANCE SIGNALS section")
+	}
+	if !strings.Contains(prompt, "hot-svc") {
+		t.Errorf("reasoner user prompt missing 'hot-svc' in performance section")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2: Generator system prompt
+// ---------------------------------------------------------------------------
+
+func TestBuildGeneratorSystem(t *testing.T) {
+	pb := NewPromptBuilder()
+	sys := pb.BuildGeneratorSystem()
 
 	checks := []struct {
 		name    string
 		snippet string
 	}{
-		{"namespace", "production"},
-		{"deployment name api-server", "api-server"},
-		{"cluster state header", "CLUSTER STATE"},
-		{"summary text", "Namespace contains"},
+		{"smooth generator identity", "Smooth Generator"},
+		{"patches field", "patches"},
+		{"kubectl apply rule", "kubectl apply"},
+		{"yaml field", "yaml"},
 	}
 	for _, tc := range checks {
 		t.Run(tc.name, func(t *testing.T) {
-			if !strings.Contains(prompt, tc.snippet) {
-				t.Errorf("prompt missing cluster_context section %q", tc.snippet)
+			if !strings.Contains(sys, tc.snippet) {
+				t.Errorf("generator system prompt missing %q", tc.snippet)
 			}
 		})
 	}
 }
 
-func TestBuildPrompt_MetricsSnapshot(t *testing.T) {
+// ---------------------------------------------------------------------------
+// Stage 2: Generator user prompt
+// ---------------------------------------------------------------------------
+
+func TestBuildGeneratorUser(t *testing.T) {
 	pb := NewPromptBuilder()
-	agg, up := makeAggregated("prod", "optimise resources")
-
-	prompt := pb.BuildPrompt(up, agg)
-
-	if !strings.Contains(prompt, "METRICS") {
-		t.Errorf("prompt missing METRICS section")
-	}
-	// api-server has metrics entries; verify at least the deployment name appears near metrics
-	if !strings.Contains(prompt, "api-server") {
-		t.Errorf("prompt missing api-server in metrics section")
-	}
-}
-
-func TestBuildPrompt_PoliciesSummary_Gaps(t *testing.T) {
-	pb := NewPromptBuilder()
-	agg, up := makeAggregated("dev", "review")
-
-	prompt := pb.BuildPrompt(up, agg)
-
-	// The "policies summary" / gap analysis section must mention deployments without services
-	if !strings.Contains(prompt, "worker") {
-		t.Errorf("prompt missing worker in gaps section")
-	}
-	if !strings.Contains(prompt, "DETECTED GAPS") {
-		t.Errorf("prompt missing DETECTED GAPS section")
-	}
-}
-
-func TestBuildPrompt_MoreThanFiveDeployments_Truncated(t *testing.T) {
-	pb := NewPromptBuilder()
-	agg := &collector.AggregatedContext{
-		ClusterContext: &collector.ClusterContext{
-			TargetNamespace: "big",
+	reasoner := &ReasonerOutput{
+		InferredNeeds: []InferredNeed{
+			{Type: "HPA", Reason: "high CPU", Priority: "high", Spec: "minReplicas=2"},
 		},
-		MetricsSnapshots: map[string]*metrics.MetricsSnapshot{},
-		Summary:          collector.ContextSummary{TextSummary: "many deployments"},
-	}
-	for i := range 7 {
-		agg.ClusterContext.Deployments = append(agg.ClusterContext.Deployments,
-			collector.DeploymentInfo{Name: strings.Repeat("x", i+1) + "-svc"})
+		Confidence:  0.85,
+		Risk:        "low",
+		Explanation: "scale needed",
 	}
 
-	prompt := pb.BuildPrompt("test", agg)
+	prompt := pb.BuildGeneratorUser("add HPA for api-server", "production", reasoner)
 
-	// The builder caps at 5 and appends "... and N more"
-	if !strings.Contains(prompt, "more") {
-		t.Errorf("prompt did not truncate deployments list; expected 'more' suffix")
+	checks := []struct {
+		name    string
+		snippet string
+	}{
+		{"user prompt present", "add HPA for api-server"},
+		{"namespace present", "production"},
+		{"reasoner json present", "inferredNeeds"},
+		{"hpa type present", "HPA"},
+		{"policy constraints present", "POLICY CONSTRAINTS"},
 	}
-}
-
-func TestBuildPrompt_NoMetrics_SectionAbsent(t *testing.T) {
-	pb := NewPromptBuilder()
-	agg := &collector.AggregatedContext{
-		ClusterContext: &collector.ClusterContext{
-			TargetNamespace: "empty",
-		},
-		MetricsSnapshots: map[string]*metrics.MetricsSnapshot{},
-		Summary:          collector.ContextSummary{TextSummary: "no metrics"},
-	}
-
-	prompt := pb.BuildPrompt("test", agg)
-
-	if strings.Contains(prompt, "METRICS") {
-		t.Errorf("prompt should not contain METRICS section when snapshots are absent")
+	for _, tc := range checks {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(prompt, tc.snippet) {
+				t.Errorf("generator user prompt missing %q", tc.snippet)
+			}
+		})
 	}
 }
 
-func TestBuildPrompt_TokenSizeCap(t *testing.T) {
-	// Ensure extremely large deployments don't silently create prompts > 50 KB.
-	// The builder caps at 5 deployments; each YAML snippet can still be large,
-	// but the hard limit we assert here is a sanity check on runaway growth.
-	const maxExpectedBytes = 50_000
+// ---------------------------------------------------------------------------
+// WithPolicySummary
+// ---------------------------------------------------------------------------
 
+func TestWithPolicySummary(t *testing.T) {
 	pb := NewPromptBuilder()
-	agg := &collector.AggregatedContext{
-		ClusterContext: &collector.ClusterContext{
-			TargetNamespace: "big",
-		},
-		MetricsSnapshots: map[string]*metrics.MetricsSnapshot{},
-		Summary:          collector.ContextSummary{TextSummary: strings.Repeat("x", 1000)},
-	}
-	// 5 deployments each with a large YAML snippet
-	bigYAML := strings.Repeat("y: "+strings.Repeat("z", 200)+"\n", 10)
-	for i := range 5 {
-		agg.ClusterContext.Deployments = append(agg.ClusterContext.Deployments,
-			collector.DeploymentInfo{
-				Name:        strings.Repeat("d", i+1),
-				YAMLSnippet: bigYAML,
-			})
-	}
+	custom := "custom-policy: no-privesc"
 
-	prompt := pb.BuildPrompt(strings.Repeat("u", 500), agg)
+	pbCopy := pb.WithPolicySummary(custom)
 
-	if len(prompt) > maxExpectedBytes {
-		t.Errorf("prompt exceeds expected size cap: got %d bytes, want <= %d", len(prompt), maxExpectedBytes)
+	// Original must be unmodified.
+	if pb.PolicySummary == custom {
+		t.Error("WithPolicySummary must return a copy; original was mutated")
+	}
+	if pbCopy.PolicySummary != custom {
+		t.Errorf("copy PolicySummary = %q, want %q", pbCopy.PolicySummary, custom)
+	}
+	// The copy's prompts must include the custom policy.
+	sys := pbCopy.BuildReasonerUser("test", nil)
+	if !strings.Contains(sys, custom) {
+		t.Errorf("BuildReasonerUser on copy does not include custom policy")
 	}
 }

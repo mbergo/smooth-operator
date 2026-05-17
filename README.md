@@ -2,6 +2,12 @@
 
 **A Kubernetes-native conversational operator that uses LLMs to infer, suggest, and apply infrastructure changes based on natural language prompts.**
 
+[![Build](https://github.com/mbergo/smooth-operator/actions/workflows/build.yml/badge.svg)](https://github.com/mbergo/smooth-operator/actions/workflows/build.yml)
+[![Test](https://github.com/mbergo/smooth-operator/actions/workflows/test.yml/badge.svg)](https://github.com/mbergo/smooth-operator/actions/workflows/test.yml)
+[![E2E](https://github.com/mbergo/smooth-operator/actions/workflows/e2e.yml/badge.svg)](https://github.com/mbergo/smooth-operator/actions/workflows/e2e.yml)
+[![Integration](https://github.com/mbergo/smooth-operator/actions/workflows/integration.yml/badge.svg)](https://github.com/mbergo/smooth-operator/actions/workflows/integration.yml)
+[![Lint](https://github.com/mbergo/smooth-operator/actions/workflows/lint.yml/badge.svg)](https://github.com/mbergo/smooth-operator/actions/workflows/lint.yml)
+
 ## Overview
 
 Smooth Operator is a GitOps-aware Kubernetes operator that bridges the gap between natural language intent and Kubernetes resources. It watches `ChatSession` CRDs (created by a Chat UI), analyzes cluster state and metrics, consults an LLM (like OpenAI) to determine what's needed, and then either suggests changes (with human approval) or applies them automatically (with policy gates).
@@ -193,7 +199,55 @@ previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml
 is manually re-applied afterwards.
 
 ## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
+
+We welcome contributions to Smooth Operator. Please follow the guidelines below to ensure a smooth collaboration.
+
+### Reporting Issues
+
+Found a bug or have a feature request? Please open an issue on our [issue tracker](https://github.com/mbergo/smooth-operator/issues). Include as much detail as possible, including steps to reproduce and your environment.
+
+### Development Workflow
+
+1. **Fork the repository** and create a feature branch from `main`
+2. **Set up your environment**: Run `make install` to install CRDs, then `make run` to start the operator locally
+3. **Make your changes** and ensure all tests pass with `make test`
+4. **Submit a pull request** with a clear description of your changes
+
+### Development Setup
+
+To set up your local development environment:
+
+```bash
+make install   # Install CRDs into cluster
+make run       # Run operator locally
+make test      # Run unit tests
+```
+
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for detailed setup instructions and troubleshooting.
+
+### Commit Guidelines
+
+- Use [Conventional Commits](https://www.conventionalcommits.org/) style for all commit messages
+- All commits must be signed (`git commit -S`). This ensures code provenance and authenticity
+- Commit messages must not reference AI tools or generated-by statements
+
+Example:
+```
+feat: add prometheus metrics collection
+fix: resolve memory leak in collector
+docs: update operator installation guide
+```
+
+### Code Review
+
+All pull requests require review by project maintainers. During code review, we assess:
+
+- Code quality and consistency with project standards
+- Test coverage for new functionality
+- Documentation for user-facing changes
+- Alignment with Kubernetes operator best practices
+
+For more information, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 **NOTE:** Run `make help` for more information on all potential `make` targets
 

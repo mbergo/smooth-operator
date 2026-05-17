@@ -91,6 +91,7 @@ func NewEngine() *Engine {
 			&ImageRegistryPolicy{},
 			&HostPathPolicy{},
 			&PrivilegedContainerPolicy{},
+			&LoadBalancerInternalAnnotationPolicy{},
 		},
 	}
 }
@@ -159,3 +160,22 @@ func (e *Engine) EvaluateManifest(ctx context.Context, obj *unstructured.Unstruc
 func (e *Engine) AddPolicy(policy Policy) {
 	e.policies = append(e.policies, policy)
 }
+
+// AutoModeAllowed reports whether automatic application is permitted given a risk
+// level and confidence score. Auto-mode is allowed only when risk is "low" or
+// "med" AND confidence is at or above the minimum threshold (0.7 by default).
+//
+// The minConfidence parameter is typically DefaultMinConfidence (0.7). Pass a
+// negative value to use the default.
+func AutoModeAllowed(risk string, confidence float64, minConfidence float64) bool {
+	if minConfidence < 0 {
+		minConfidence = DefaultMinConfidence
+	}
+	if confidence < minConfidence {
+		return false
+	}
+	return risk == "low" || risk == "med"
+}
+
+// DefaultMinConfidence is the minimum LLM confidence score required for auto-mode.
+const DefaultMinConfidence = 0.7

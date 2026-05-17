@@ -18,7 +18,13 @@ package logs
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"strconv"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -26,8 +32,18 @@ import (
 
 // LokiClient handles queries to Loki for log aggregation
 type LokiClient struct {
-	address string
-	enabled bool
+	address      string
+	enabled      bool
+	httpClient   *http.Client
+	queryTimeout time.Duration
+}
+
+// LogEntry represents a single log line returned from Loki.
+type LogEntry struct {
+	// Timestamp is the nanosecond-epoch string as returned by Loki, parsed to time.Time.
+	Timestamp time.Time
+	// Line is the raw log line text.
+	Line string
 }
 
 // LogSummary contains aggregated log information
@@ -78,10 +94,97 @@ func DefaultLokiOptions() LokiOptions {
 
 // NewLokiClient creates a new Loki client
 func NewLokiClient(options LokiOptions) (*LokiClient, error) {
+	qt := options.QueryTimeout
+	if qt <= 0 {
+		qt = 10 * time.Second
+	}
 	return &LokiClient{
-		address: options.Address,
-		enabled: options.Enabled,
+		address:      options.Address,
+		enabled:      options.Enabled,
+		httpClient:   &http.Client{},
+		queryTimeout: qt,
 	}, nil
+}
+
+// QueryLogs runs the given LogQL string verbatim; callers MUST validate/sanitize untrusted input.
+//
+// The caller supplies an already-cancelled or deadline-carrying context; an additional
+// per-client timeout (default 10 s) is applied on top so individual requests never
+// block indefinitely.
+func (l *LokiClient) QueryLogs(ctx context.Context, logql string, start, end time.Time, limit int) ([]LogEntry, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, l.queryTimeout)
+	defer cancel()
+
+	endpoint, err := url.Parse(l.address)
+	if err != nil {
+		return nil, fmt.Errorf("loki: invalid base URL %q: %w", l.address, err)
+	}
+	endpoint.Path = "/loki/api/v1/query_range"
+
+	q := endpoint.Query()
+	q.Set("query", logql)
+	q.Set("start", start.UTC().Format(time.RFC3339Nano))
+	q.Set("end", end.UTC().Format(time.RFC3339Nano))
+	q.Set("limit", strconv.Itoa(limit))
+	endpoint.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("loki: building request: %w", err)
+	}
+
+	if token := os.Getenv("LOKI_TOKEN"); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := l.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("loki: executing query: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("loki: reading response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("loki: query returned HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Loki response shape:
+	// {"data":{"result":[{"values":[["<ns-ts>","<line>"],...]}]}}
+	var parsed struct {
+		Data struct {
+			Result []struct {
+				Values [][]string `json:"values"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("loki: decoding response: %w", err)
+	}
+
+	var entries []LogEntry
+	for _, stream := range parsed.Data.Result {
+		for _, pair := range stream.Values {
+			if len(pair) < 2 {
+				continue
+			}
+			// Loki timestamps are nanosecond-epoch strings.
+			ns, err := strconv.ParseInt(pair[0], 10, 64)
+			if err != nil {
+				// Fall back to zero time rather than aborting the whole result set.
+				entries = append(entries, LogEntry{Line: pair[1]})
+				continue
+			}
+			entries = append(entries, LogEntry{
+				Timestamp: time.Unix(0, ns).UTC(),
+				Line:      pair[1],
+			})
+		}
+	}
+	return entries, nil
 }
 
 // CollectLogs gathers log information from Loki for a namespace/deployment
@@ -96,26 +199,30 @@ func (l *LokiClient) CollectLogs(ctx context.Context, namespace, deployment stri
 		}, nil
 	}
 
-	log := log.FromContext(ctx)
-	log.Info("Collecting Loki logs (stub implementation)",
+	logger := log.FromContext(ctx)
+	logger.Info("Collecting Loki logs",
 		"namespace", namespace,
 		"deployment", deployment,
 		"window", window.String(),
 	)
 
+	now := time.Now()
 	summary := &LogSummary{
 		Namespace:   namespace,
 		Deployment:  deployment,
-		WindowEnd:   time.Now(),
-		WindowStart: time.Now().Add(-window),
+		WindowEnd:   now,
+		WindowStart: now.Add(-window),
 		Errors:      []string{},
 	}
 
-	// TODO: Implement actual Loki LogQL queries
-	// For Phase 1, this is a stub implementation
-	// Full implementation will be added in a future phase
-	summary.Errors = append(summary.Errors, "Loki integration is stub implementation (Phase 1)")
+	logql := fmt.Sprintf(`{namespace=%q, deployment=%q}`, namespace, deployment)
+	entries, err := l.QueryLogs(ctx, logql, summary.WindowStart, summary.WindowEnd, 1000)
+	if err != nil {
+		summary.Errors = append(summary.Errors, fmt.Sprintf("query failed: %v", err))
+		return summary, nil
+	}
 
+	summary.TotalLogLines = int64(len(entries))
 	return summary, nil
 }
 
@@ -124,12 +231,35 @@ func (l *LokiClient) IsEnabled() bool {
 	return l.enabled
 }
 
-// HealthCheck performs a basic health check against Loki
+// HealthCheck performs a basic health check against Loki's /ready endpoint.
+// It applies a 5-second deadline on top of any deadline already present in ctx.
 func (l *LokiClient) HealthCheck(ctx context.Context) error {
 	if !l.enabled {
 		return fmt.Errorf("loki client is not enabled")
 	}
 
-	// TODO: Implement actual health check
-	return fmt.Errorf("loki health check not implemented (stub)")
+	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	endpoint, err := url.JoinPath(l.address, "/ready")
+	if err != nil {
+		return fmt.Errorf("loki: building health-check URL: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("loki: building health-check request: %w", err)
+	}
+
+	resp, err := l.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("loki: health check failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("loki: unhealthy (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+	return nil
 }

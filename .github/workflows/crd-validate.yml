@@ -1,0 +1,48 @@
+name: CRD Validation
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  crd-validate:
+    name: Validate CRDs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Cache Go modules and build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            bin/
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+
+      - name: Install kubeconform
+        run: go install github.com/yannh/kubeconform/cmd/kubeconform@latest
+
+      - name: Generate manifests
+        run: make manifests
+
+      - name: Validate CRDs
+        run: |
+          if [ -d "config/crd/bases" ]; then
+            kubeconform -summary -output json config/crd/bases/*.yaml
+          fi
+
+      - name: Validate sample manifests
+        run: |
+          if [ -d "config/samples" ]; then
+            kubeconform -summary -output json config/samples/*.yaml
+          fi

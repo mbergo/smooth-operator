@@ -325,6 +325,43 @@ func (p *HostPathPolicy) Evaluate(ctx context.Context, obj *unstructured.Unstruc
 	return &PolicyResult{Passed: true, PolicyName: p.Name()}
 }
 
+// LoadBalancerInternalAnnotationPolicy requires internal annotation on LoadBalancer Services
+type LoadBalancerInternalAnnotationPolicy struct{}
+
+func (p *LoadBalancerInternalAnnotationPolicy) Name() string {
+	return "loadbalancer-internal-annotation"
+}
+
+func (p *LoadBalancerInternalAnnotationPolicy) Severity() string {
+	return "blocking"
+}
+
+func (p *LoadBalancerInternalAnnotationPolicy) Evaluate(ctx context.Context, obj *unstructured.Unstructured) *PolicyResult {
+	if obj.GetKind() != "Service" {
+		return &PolicyResult{Passed: true, PolicyName: p.Name()}
+	}
+
+	serviceType, _, _ := unstructured.NestedString(obj.Object, "spec", "type")
+	if serviceType != "LoadBalancer" {
+		return &PolicyResult{Passed: true, PolicyName: p.Name()}
+	}
+
+	annotations := obj.GetAnnotations()
+	if annotations != nil {
+		if _, ok := annotations["service.beta.kubernetes.io/aws-load-balancer-internal"]; ok {
+			return &PolicyResult{Passed: true, PolicyName: p.Name()}
+		}
+	}
+
+	return &PolicyResult{
+		Passed:       false,
+		PolicyName:   p.Name(),
+		Message:      "LoadBalancer Service must have annotation service.beta.kubernetes.io/aws-load-balancer-internal",
+		Severity:     p.Severity(),
+		SuggestedFix: `Add annotation: service.beta.kubernetes.io/aws-load-balancer-internal: "true"`,
+	}
+}
+
 // PrivilegedContainerPolicy prevents privileged containers
 type PrivilegedContainerPolicy struct{}
 

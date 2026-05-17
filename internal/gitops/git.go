@@ -17,10 +17,17 @@ limitations under the License.
 package gitops
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/go-git/go-git/v5"
@@ -33,12 +40,27 @@ import (
 // GitClient handles Git operations
 type GitClient struct {
 	workDir string
+
+	// httpClient is used for API calls; defaults to http.DefaultClient.
+	// Tests can inject a custom client pointing at an httptest.Server.
+	httpClient *http.Client
+
+	// githubAPIBase is the base URL for the GitHub REST API.
+	// Defaults to "https://api.github.com". Override in tests.
+	githubAPIBase string
+
+	// gitlabAPIBase is the base URL for the GitLab REST API.
+	// Defaults to "https://gitlab.com/api/v4". Override in tests.
+	gitlabAPIBase string
 }
 
 // NewGitClient creates a new Git client
 func NewGitClient() *GitClient {
 	return &GitClient{
-		workDir: "/tmp/smooth-operator-git",
+		workDir:       "/tmp/smooth-operator-git",
+		httpClient:    http.DefaultClient,
+		githubAPIBase: "https://api.github.com",
+		gitlabAPIBase: "https://gitlab.com/api/v4",
 	}
 }
 
@@ -191,10 +213,213 @@ func (g *GitClient) CommitAndPush(
 	return result, nil
 }
 
-// createPullRequest creates a PR on GitHub/GitLab
+// repoInfo holds parsed repository owner/name and host.
+type repoInfo struct {
+	host  string // e.g. "github.com" or "gitlab.com"
+	owner string
+	name  string
+}
+
+// parseRemoteURL extracts host, owner, and repo name from SSH or HTTPS remote URLs.
+//
+// Supported forms:
+//
+//	HTTPS: https://github.com/owner/repo.git        https://github.com/owner/repo
+//	       https://gitlab.com/group/sub/repo.git     (GitLab subgroups)
+//	SSH:   git@github.com:owner/repo.git             ssh://git@github.com/owner/repo.git
+//	       git@gitlab.com:group/subgroup/repo.git    (GitLab subgroups)
+//
+// For paths with subgroups (e.g. group/subgroup/repo), owner is set to the first
+// path segment and name captures the remainder (subgroup/repo), preserving slashes.
+func parseRemoteURL(rawURL string) (repoInfo, error) {
+	rawURL = strings.TrimSpace(rawURL)
+
+	// SSH SCP-like form: git@host:path/to/repo[.git]
+	// Only matches when the URL does NOT contain "://", so that HTTPS/ssh:// URLs
+	// are handled by the scheme-stripping path below.
+	// The path after the colon may contain multiple slashes (GitLab subgroups).
+	scpRe := regexp.MustCompile(`^(?:[^@]+@)?([^:/]+):(.+?)(?:\.git)?$`)
+	if !strings.Contains(rawURL, "://") {
+		if m := scpRe.FindStringSubmatch(rawURL); m != nil {
+			fullPath := m[2]
+			slashIdx := strings.Index(fullPath, "/")
+			if slashIdx < 0 {
+				return repoInfo{}, fmt.Errorf("cannot parse remote URL %q: no slash in repo path", rawURL)
+			}
+			return repoInfo{host: m[1], owner: fullPath[:slashIdx], name: fullPath[slashIdx+1:]}, nil
+		}
+	}
+
+	// HTTPS / ssh:// forms – strip the scheme and leading slashes
+	cleaned := rawURL
+	for _, scheme := range []string{"https://", "http://", "ssh://", "git://"} {
+		if strings.HasPrefix(cleaned, scheme) {
+			cleaned = strings.TrimPrefix(cleaned, scheme)
+			break
+		}
+	}
+	// Strip optional user info (git@)
+	if at := strings.Index(cleaned, "@"); at != -1 {
+		cleaned = cleaned[at+1:]
+	}
+	// parts[0]=host, parts[1]=owner, parts[2]=rest-of-path (may include subgroups)
+	parts := strings.SplitN(cleaned, "/", 3)
+	if len(parts) < 3 {
+		return repoInfo{}, fmt.Errorf("cannot parse remote URL %q: expected host/owner/repo", rawURL)
+	}
+	host := parts[0]
+	owner := parts[1]
+	repoName := strings.TrimSuffix(parts[2], ".git")
+	return repoInfo{host: host, owner: owner, name: repoName}, nil
+}
+
+// PRResult holds the URL and number of a newly created pull/merge request.
+type PRResult struct {
+	URL    string
+	Number int
+}
+
+// createPullRequest creates a PR (GitHub) or MR (GitLab) via the REST API.
+// If GITHUB_TOKEN (or GITLAB_TOKEN for GitLab) is unset it logs a warning and
+// returns nil, nil (graceful degradation).
 func (g *GitClient) createPullRequest(ctx context.Context, options GitOptions, branch, chatSessionID string) (string, error) {
-	// TODO: Implement actual GitHub/GitLab API integration
-	// For Phase 5 MVP, return a placeholder URL
-	prURL := fmt.Sprintf("https://github.com/example/repo/pull/new/%s", branch)
-	return prURL, nil
+	logger := log.FromContext(ctx)
+
+	info, err := parseRemoteURL(options.RepoURL)
+	if err != nil {
+		return "", fmt.Errorf("createPullRequest: %w", err)
+	}
+
+	title := fmt.Sprintf("feat(smooth): %s", chatSessionID)
+	body := fmt.Sprintf("Automated change created by Smooth Operator.\nChatSession: %s", chatSessionID)
+	base := options.BaseBranch
+	if base == "" {
+		base = "main"
+	}
+
+	switch {
+	case info.host == "gitlab.com" || strings.HasSuffix(info.host, ".gitlab.com"):
+		return g.createGitLabMR(ctx, info, branch, base, title, body)
+	default:
+		// Treat everything else as GitHub (including GHE)
+		token := os.Getenv("GITHUB_TOKEN")
+		if token == "" {
+			logger.Info("GITHUB_TOKEN not set; skipping PR creation")
+			return "", nil
+		}
+		pr, err := g.createGitHubPR(ctx, info, token, branch, base, title, body)
+		if err != nil {
+			return "", err
+		}
+		if pr == nil {
+			return "", nil
+		}
+		return pr.URL, nil
+	}
+}
+
+// createGitHubPR posts to the GitHub REST API and returns the PR URL and number.
+func (g *GitClient) createGitHubPR(
+	ctx context.Context,
+	info repoInfo,
+	token, head, base, title, body string,
+) (*PRResult, error) {
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/pulls", g.githubAPIBase, info.owner, info.name)
+
+	payload, _ := json.Marshal(map[string]string{
+		"title": title,
+		"head":  head,
+		"base":  base,
+		"body":  body,
+	})
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("github PR: build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("github PR: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusCreated {
+		if len(raw) > 512 {
+			raw = raw[:512]
+		}
+		return nil, fmt.Errorf("github PR: unexpected status %d: %s", resp.StatusCode, raw)
+	}
+
+	var out struct {
+		HTMLURL string `json:"html_url"`
+		Number  int    `json:"number"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("github PR: parse response: %w", err)
+	}
+	return &PRResult{URL: out.HTMLURL, Number: out.Number}, nil
+}
+
+// createGitLabMR posts to the GitLab REST API and returns the MR URL.
+func (g *GitClient) createGitLabMR(
+	ctx context.Context,
+	info repoInfo,
+	sourceBranch, targetBranch, title, description string,
+) (string, error) {
+	logger := log.FromContext(ctx)
+
+	token := os.Getenv("GITLAB_TOKEN")
+	if token == "" {
+		logger.Info("GITLAB_TOKEN not set; skipping MR creation")
+		return "", nil
+	}
+
+	// GitLab project ID is the URL-encoded "owner/name" path.
+	// url.PathEscape encodes the full path (including subgroup slashes) as %2F,
+	// which is required by the GitLab Projects API.
+	projectID := url.PathEscape(info.owner + "/" + info.name)
+	apiURL := fmt.Sprintf("%s/projects/%s/merge_requests", g.gitlabAPIBase, projectID)
+
+	payload, _ := json.Marshal(map[string]string{
+		"source_branch": sourceBranch,
+		"target_branch": targetBranch,
+		"title":         title,
+		"description":   description,
+	})
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(payload))
+	if err != nil {
+		return "", fmt.Errorf("gitlab MR: build request: %w", err)
+	}
+	req.Header.Set("Private-Token", token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("gitlab MR: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusCreated {
+		if len(raw) > 512 {
+			raw = raw[:512]
+		}
+		return "", fmt.Errorf("gitlab MR: unexpected status %d: %s", resp.StatusCode, raw)
+	}
+
+	var out struct {
+		WebURL string `json:"web_url"`
+		IID    int    `json:"iid"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("gitlab MR: parse response: %w", err)
+	}
+	return out.WebURL, nil
 }

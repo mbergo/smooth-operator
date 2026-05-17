@@ -23,7 +23,16 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version-file: go.mod
+
+      - name: Cache Go modules and build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            bin/
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
 
       - name: Create kind cluster
         uses: helm/kind-action@v1

@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
@@ -39,13 +40,34 @@ import (
 	smoothv1 "github.com/mbergo/smooth-operator/api/v1"
 	"github.com/mbergo/smooth-operator/internal/collector"
 	"github.com/mbergo/smooth-operator/internal/controller"
+	"github.com/mbergo/smooth-operator/internal/executor"
+	"github.com/mbergo/smooth-operator/internal/gitops"
 	"github.com/mbergo/smooth-operator/internal/llm"
 	"github.com/mbergo/smooth-operator/internal/logs"
 	"github.com/mbergo/smooth-operator/internal/metrics"
 	"github.com/mbergo/smooth-operator/internal/planner"
-	"github.com/mbergo/smooth-operator/internal/executor"
 	// +kubebuilder:scaffold:imports
 )
+
+// gitopsAgentAdapter adapts *gitops.Agent to the controller.GitopsAgent interface.
+// It extracts the fields available on a SmoothAction and forwards them to
+// ProcessSuccessfulExecution, leaving optional fields empty when not present on the spec.
+type gitopsAgentAdapter struct {
+	agent *gitops.Agent
+}
+
+func (a *gitopsAgentAdapter) GenerateAndCommit(ctx context.Context, action *smoothv1.SmoothAction) (*gitops.GitCommitResult, error) {
+	return a.agent.ProcessSuccessfulExecution(
+		ctx,
+		action.Name,                                      // chatSessionName
+		controller.SanitizePrompt(action.Spec.ChatRef),   // userPrompt (best available proxy; sanitized)
+		"",                                               // gitRepo — not stored on SmoothAction; populated by env/config in agent
+		"",                                               // gitPath — same as above
+		nil,                                              // llmResponse — not available at reconcile time
+		nil,                                              // executionPlan — not available at reconcile time
+		nil,                                              // executionResult — not available at reconcile time
+	)
+}
 
 var (
 	scheme   = runtime.NewScheme()
@@ -144,14 +166,7 @@ func main() {
 		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
-	// If the certificate is not specified, controller-runtime will automatically
-	// generate self-signed certificates for the metrics server. While convenient for development and testing,
-	// this setup is not recommended for production.
-	//
-	// TODO(user): If you enable certManager, uncomment the following lines:
-	// - [METRICS-WITH-CERTS] at config/default/kustomization.yaml to generate and use certificates
-	// managed by cert-manager for the metrics server.
-	// - [PROMETHEUS-WITH-CERTS] at config/prometheus/kustomization.yaml for TLS certification.
+	// Use externally-provided TLS certificates for metrics when metricsCertPath is set; otherwise controller-runtime issues self-signed certs.
 	if len(metricsCertPath) > 0 {
 		setupLog.Info("Initializing metrics certificate watcher using provided certificates",
 			"metrics-cert-path", metricsCertPath, "metrics-cert-name", metricsCertName, "metrics-cert-key", metricsCertKey)
@@ -236,7 +251,7 @@ func main() {
 		os.Exit(1)
 	}
 	if llmClient.IsEnabled() {
-		setupLog.Info("🤖 LLM integration enabled", "model", llmOptions.Model)
+		setupLog.Info("LLM integration enabled", "model", llmOptions.Model)
 	} else {
 		setupLog.Info("LLM integration disabled (set OPENAI_API_KEY to enable)")
 	}
@@ -245,7 +260,7 @@ func main() {
 	riskOptions := planner.DefaultRiskAssessorOptions()
 	plannerEngine := planner.NewPlanner(mgr.GetClient(), riskOptions)
 	reporter := planner.NewReporter()
-	setupLog.Info("🛡️  Policy engine initialized",
+	setupLog.Info("Policy engine initialized",
 		"minConfidence", riskOptions.MinConfidence,
 		"highRiskNamespaces", riskOptions.HighRiskNamespaces,
 	)
@@ -265,10 +280,14 @@ func main() {
 	// 8. Executor for applying changes
 	executorOptions := executor.DefaultExecutorOptions()
 	executorEngine := executor.NewExecutor(mgr.GetClient(), executorOptions)
-	setupLog.Info("⚙️  Executor initialized",
+	setupLog.Info("Executor initialized",
 		"rolloutTimeout", executorOptions.RolloutTimeout.String(),
 		"enableRollback", executorOptions.EnableRollback,
 	)
+
+	// 10. GitOps Agent
+	gitAgent := &gitopsAgentAdapter{agent: gitops.NewAgent()}
+	setupLog.Info("GitOps agent initialized")
 
 	// 9. Setup SmoothAction Controller
 	if err := (&controller.SmoothActionReconciler{
@@ -276,6 +295,7 @@ func main() {
 		Scheme:   mgr.GetScheme(),
 		Executor: executorEngine,
 		Recorder: mgr.GetEventRecorderFor("smooth-operator"),
+		GitAgent: gitAgent,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SmoothAction")
 		os.Exit(1)

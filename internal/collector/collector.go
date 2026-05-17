@@ -19,7 +19,9 @@ package collector
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -29,6 +31,101 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+const maxAnnotationValueLen = 256
+
+// sensitiveAnnotationPrefixes lists annotation key prefixes (and exact keys) that
+// must never be forwarded to the Reasoner prompt because they routinely carry
+// secrets, full prior manifests with inlined env-var values, or PEM material.
+var sensitiveAnnotationPrefixes = []string{
+	"kubectl.kubernetes.io/last-applied-configuration",
+	"deployment.kubernetes.io/revision",
+	"cert-manager.io/",
+	"kubectl.kubernetes.io/restartedAt",
+}
+
+// scrubAnnotations returns a sanitized copy of the given annotation map.
+// It drops any key whose name matches a sensitive prefix, drops any entry
+// whose value contains a PEM block marker, and truncates remaining values
+// to maxAnnotationValueLen characters.
+func scrubAnnotations(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		if isSensitiveAnnotationKey(k) {
+			continue
+		}
+		if strings.Contains(v, "-----BEGIN") {
+			continue
+		}
+		if len(v) > maxAnnotationValueLen {
+			v = v[:maxAnnotationValueLen]
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// isSensitiveAnnotationKey returns true when key matches any entry in
+// sensitiveAnnotationPrefixes (exact match or prefix match for entries that
+// end with "/").
+func isSensitiveAnnotationKey(key string) bool {
+	for _, prefix := range sensitiveAnnotationPrefixes {
+		if strings.HasSuffix(prefix, "/") {
+			if strings.HasPrefix(key, prefix) {
+				return true
+			}
+		} else {
+			if key == prefix {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// scrubLabels returns a copy of the given label map with each value truncated
+// to maxAnnotationValueLen characters. Labels are less likely to carry
+// sensitive payloads than annotations, but we apply length-capping defensively.
+func scrubLabels(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		if len(v) > maxAnnotationValueLen {
+			v = v[:maxAnnotationValueLen]
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// sanitizeEventMessage strips control characters (newlines, carriage returns,
+// tabs, and other non-printable runes) from an event message and truncates the
+// result to maxAnnotationValueLen characters. This limits the blast radius of
+// prompt-injection payloads authored by hostile workloads.
+func sanitizeEventMessage(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			b.WriteRune(' ')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	result := b.String()
+	if len(result) > maxAnnotationValueLen {
+		result = result[:maxAnnotationValueLen]
+	}
+	return result
+}
 
 // Collector collects Kubernetes resources and context
 type Collector struct {
@@ -145,8 +242,8 @@ func (c *Collector) collectDeployments(ctx context.Context, namespace string) ([
 			Replicas:          *dep.Spec.Replicas,
 			ReadyReplicas:     dep.Status.ReadyReplicas,
 			AvailableReplicas: dep.Status.AvailableReplicas,
-			Labels:            dep.Labels,
-			Annotations:       dep.Annotations,
+			Labels:            scrubLabels(dep.Labels),
+			Annotations:       scrubAnnotations(dep.Annotations),
 			Conditions:        dep.Status.Conditions,
 			CreationTimestamp: dep.CreationTimestamp,
 		}
@@ -217,8 +314,8 @@ func (c *Collector) collectServices(ctx context.Context, namespace string) ([]Se
 			ExternalIPs:       svc.Spec.ExternalIPs,
 			Ports:             svc.Spec.Ports,
 			Selector:          svc.Spec.Selector,
-			Labels:            svc.Labels,
-			Annotations:       svc.Annotations,
+			Labels:            scrubLabels(svc.Labels),
+			Annotations:       scrubAnnotations(svc.Annotations),
 			CreationTimestamp: svc.CreationTimestamp,
 		}
 
@@ -252,8 +349,8 @@ func (c *Collector) collectIngresses(ctx context.Context, namespace string) ([]I
 			Namespace:         ing.Namespace,
 			Rules:             ing.Spec.Rules,
 			TLS:               ing.Spec.TLS,
-			Labels:            ing.Labels,
-			Annotations:       ing.Annotations,
+			Labels:            scrubLabels(ing.Labels),
+			Annotations:       scrubAnnotations(ing.Annotations),
 			CreationTimestamp: ing.CreationTimestamp,
 		}
 
@@ -294,8 +391,8 @@ func (c *Collector) collectPods(ctx context.Context, namespace string) ([]PodInf
 			Phase:             pod.Status.Phase,
 			HostIP:            pod.Status.HostIP,
 			PodIP:             pod.Status.PodIP,
-			Labels:            pod.Labels,
-			Annotations:       pod.Annotations,
+			Labels:            scrubLabels(pod.Labels),
+			Annotations:       scrubAnnotations(pod.Annotations),
 			Conditions:        pod.Status.Conditions,
 			CreationTimestamp: pod.CreationTimestamp,
 		}
@@ -350,7 +447,7 @@ func (c *Collector) collectEvents(ctx context.Context, namespace string) ([]Even
 		info := EventInfo{
 			Type:               event.Type,
 			Reason:             event.Reason,
-			Message:            event.Message,
+			Message:            sanitizeEventMessage(event.Message),
 			InvolvedObjectKind: event.InvolvedObject.Kind,
 			InvolvedObjectName: event.InvolvedObject.Name,
 			Count:              event.Count,

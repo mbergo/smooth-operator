@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -31,6 +32,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -90,6 +92,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var watchNamespacesRaw string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -108,11 +111,27 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&watchNamespacesRaw, "watch-namespaces", "",
+		"Comma-separated list of namespaces the operator will watch. "+
+			"Empty (default) means watch all namespaces (cluster scope). "+
+			"When set, the manager cache is restricted to only those namespaces.")
 	opts := zap.Options{
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	// Parse the comma-separated namespace list, filtering empty strings that
+	// result from a bare empty flag value.
+	var watchNamespaces []string
+	if watchNamespacesRaw != "" {
+		for _, ns := range strings.Split(watchNamespacesRaw, ",") {
+			ns = strings.TrimSpace(ns)
+			if ns != "" {
+				watchNamespaces = append(watchNamespaces, ns)
+			}
+		}
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
@@ -176,7 +195,7 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	mgrOptions := ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
@@ -194,7 +213,20 @@ func main() {
 		// if you are doing or is intended to do any operation such as perform cleanups
 		// after the manager stops then its usage might be unsafe.
 		// LeaderElectionReleaseOnCancel: true,
-	})
+	}
+
+	// When --watch-namespaces is set, restrict the manager's informer cache to
+	// only those namespaces. This is the runtime counterpart to the namespaced
+	// RBAC scope defined in the Helm chart.
+	if len(watchNamespaces) > 0 {
+		setupLog.Info("restricting cache to namespaces", "namespaces", watchNamespaces)
+		mgrOptions.Cache.DefaultNamespaces = map[string]cache.Config{}
+		for _, ns := range watchNamespaces {
+			mgrOptions.Cache.DefaultNamespaces[ns] = cache.Config{}
+		}
+	}
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOptions)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)

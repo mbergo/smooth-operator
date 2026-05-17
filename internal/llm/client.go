@@ -237,7 +237,9 @@ func (c *Client) RunReasoner(
 
 	var out ReasonerOutput
 	if err := decodeJSON(raw, &out); err != nil {
-		return nil, fmt.Errorf("reasoner JSON decode: %w (raw=%q)", err, truncate(raw, 512))
+		logger := log.FromContext(ctx)
+		logger.V(1).Info("reasoner JSON decode failed", "rawSnippet", truncate(raw, 512))
+		return nil, fmt.Errorf("reasoner JSON decode: %w", err)
 	}
 	logUsage(ctx, "reasoner", usage)
 	return &out, nil
@@ -263,7 +265,9 @@ func (c *Client) RunGenerator(
 
 	var out GeneratorOutput
 	if err := decodeJSON(raw, &out); err != nil {
-		return nil, fmt.Errorf("generator JSON decode: %w (raw=%q)", err, truncate(raw, 512))
+		logger := log.FromContext(ctx)
+		logger.V(1).Info("generator JSON decode failed", "rawSnippet", truncate(raw, 512))
+		return nil, fmt.Errorf("generator JSON decode: %w", err)
 	}
 	logUsage(ctx, "generator", usage)
 	return &out, nil
@@ -321,8 +325,14 @@ func (c *Client) callMessages(
 		}
 	}
 	if err != nil {
-		logger.Error(err, "messages.new failed")
-		return "", anthropic.Usage{}, fmt.Errorf("anthropic messages.new: %w", err)
+		// Log the full SDK error at V(1) only — it may contain request headers
+		// or other operator-only diagnostic material that must not reach callers.
+		logger.V(1).Info("messages.new failed (full error)", "err", err.Error())
+		var apiErr *anthropic.Error
+		if errors.As(err, &apiErr) {
+			return "", anthropic.Usage{}, fmt.Errorf("anthropic messages.new failed: status=%d", apiErr.StatusCode)
+		}
+		return "", anthropic.Usage{}, fmt.Errorf("anthropic messages.new failed: transport error")
 	}
 	if resp == nil {
 		return "", anthropic.Usage{}, fmt.Errorf("anthropic messages.new: nil response")

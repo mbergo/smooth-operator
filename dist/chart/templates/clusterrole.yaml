@@ -1,4 +1,17 @@
 {{- if .Values.rbac.create -}}
+
+{{- if and (eq .Values.rbac.scope "namespaced") (not .Values.rbac.watchNamespaces) -}}
+{{- fail "rbac.scope=namespaced requires rbac.watchNamespaces to be non-empty (otherwise the operator gets zero workload permissions)" -}}
+{{- end -}}
+
+{{/*
+  Workload rules: applied cluster-wide via ClusterRole (scope=cluster) or
+  per-namespace via Role (scope=namespaced).  CRD-related rules (chatsessions,
+  smoothactions and their sub-resources) always require a ClusterRole because
+  CRDs are cluster-scoped resources.
+*/}}
+
+{{- if eq .Values.rbac.scope "cluster" }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -24,6 +37,15 @@ rules:
   - apiGroups: [networking.k8s.io]
     resources: [ingresses]
     verbs: [create, get, list, patch, update, watch]
+  - apiGroups: [""]
+    resources: [configmaps, serviceaccounts, persistentvolumeclaims]
+    verbs: [create, get, list, patch, update, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [create, get, list, patch, update, watch]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [roles, rolebindings]
+    verbs: [create, get, list, patch, update, watch]
   - apiGroups: [smooth.smooth.k8s.io]
     resources: [chatsessions, smoothactions]
     verbs: [create, delete, get, list, patch, update, watch]
@@ -48,6 +70,105 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "smooth-operator.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- end }}
+
+{{- if eq .Values.rbac.scope "namespaced" }}
+{{/*
+  CRDs are cluster-scoped; the operator still needs cluster-level permissions
+  to watch chatsessions and smoothactions across namespaces and manage their
+  finalizers/status sub-resources.  A single ClusterRole is used for CRD rules
+  only; workload rules (Deployments, Services, etc.) are scoped per-namespace.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "smooth-operator.fullname" . }}-crd-watcher
+  labels:
+    {{- include "smooth-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [smooth.smooth.k8s.io]
+    resources: [chatsessions, smoothactions]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: [smooth.smooth.k8s.io]
+    resources: [chatsessions/finalizers, smoothactions/finalizers]
+    verbs: [update]
+  - apiGroups: [smooth.smooth.k8s.io]
+    resources: [chatsessions/status, smoothactions/status]
+    verbs: [get, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "smooth-operator.fullname" . }}-crd-watcher
+  labels:
+    {{- include "smooth-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "smooth-operator.fullname" . }}-crd-watcher
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "smooth-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{/*
+  Per-namespace Role + RoleBinding for workload manipulation rules.
+*/}}
+{{- range .Values.rbac.watchNamespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "smooth-operator.fullname" $ }}-manager
+  namespace: {{ . }}
+  labels:
+    {{- include "smooth-operator.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, get, list, patch, watch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [create, get, list, patch, update, watch]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [create, get, list, patch, update, watch]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [create, get, list, patch, update, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [create, get, list, patch, update, watch]
+  - apiGroups: [""]
+    resources: [configmaps, serviceaccounts, persistentvolumeclaims]
+    verbs: [create, get, list, patch, update, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [create, get, list, patch, update, watch]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [roles, rolebindings]
+    verbs: [create, get, list, patch, update, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "smooth-operator.fullname" $ }}-manager
+  namespace: {{ . }}
+  labels:
+    {{- include "smooth-operator.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "smooth-operator.fullname" $ }}-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "smooth-operator.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}
+
 {{- if .Values.leaderElection.enabled }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

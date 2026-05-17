@@ -85,13 +85,14 @@ func (r *ChatSessionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
-	// Log the received ChatSession
+	// Log the received ChatSession. Tenant-controlled spec fields (User, Prompt)
+	// are sanitized before logging to prevent log-injection via control characters.
 	log.Info("Reconciling ChatSession",
 		"name", chatSession.Name,
 		"namespace", chatSession.Namespace,
-		"user", chatSession.Spec.User,
+		"user", SanitizePrompt(chatSession.Spec.User),
 		"targetNamespace", chatSession.Spec.TargetNamespace,
-		"prompt", chatSession.Spec.Prompt,
+		"prompt", SanitizePrompt(chatSession.Spec.Prompt),
 		"preferAuto", chatSession.Spec.PreferAuto,
 	)
 
@@ -150,7 +151,7 @@ func (r *ChatSessionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// Stage 1: Context Collection & LLM Inference (Phase 1 + Phase 2)
 	if chatSession.Status.State == "Processing" {
-		log.Info("Collecting cluster context", "targetNamespace", chatSession.Spec.TargetNamespace)
+		log.Info("Collecting cluster context", "targetNamespace", SanitizePrompt(chatSession.Spec.TargetNamespace))
 
 		// Add correlation ID to context
 		ctx = collector.WithChatSessionID(ctx, chatSession.Name)

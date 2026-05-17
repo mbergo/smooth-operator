@@ -18,6 +18,7 @@ package planner
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -253,4 +254,210 @@ metadata:
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// EnforceNamespace – namespace constraint enforcement
+// ---------------------------------------------------------------------------
+
+// makeManifest is a test helper that builds a minimal ValidatedManifest.
+func makeManifest(kind, name, namespace string) *ValidatedManifest {
+	return &ValidatedManifest{
+		Kind:      kind,
+		Name:      name,
+		Namespace: namespace,
+	}
+}
+
+// TestEnforceNamespace covers the core enforcement rules in isolation — no
+// Kubernetes API calls are needed because EnforceNamespace is a pure function
+// with respect to the client.
+func TestEnforceNamespace(t *testing.T) {
+	const target = "my-tenant"
+
+	tests := []struct {
+		name              string
+		targetNamespace   string
+		manifest          *ValidatedManifest
+		allowCrossNS      bool   // passed via WithAllowCrossNamespace
+		wantErrCount      int    // 0 means pass
+		wantErrSubstring  string // checked against first error when wantErrCount > 0
+	}{
+		{
+			name:            "matching namespace passes",
+			targetNamespace: target,
+			manifest:        makeManifest("ConfigMap", "my-config", target),
+			wantErrCount:    0,
+		},
+		{
+			name:             "non-matching namespace fails",
+			targetNamespace:  target,
+			manifest:         makeManifest("ConfigMap", "bad-config", "kube-system"),
+			wantErrCount:     1,
+			wantErrSubstring: "cross-namespace writes are not allowed",
+		},
+		{
+			name:             "empty namespace fails",
+			targetNamespace:  target,
+			manifest:         makeManifest("ConfigMap", "no-ns", ""),
+			wantErrCount:     1,
+			wantErrSubstring: "empty metadata.namespace",
+		},
+		{
+			name:             "ClusterRole is always rejected",
+			targetNamespace:  target,
+			manifest:         makeManifest("ClusterRole", "admin-role", ""),
+			wantErrCount:     1,
+			wantErrSubstring: "cluster-scoped resource",
+		},
+		{
+			name:             "Namespace kind is always rejected",
+			targetNamespace:  target,
+			manifest:         makeManifest("Namespace", "evil-ns", ""),
+			wantErrCount:     1,
+			wantErrSubstring: "cluster-scoped resource",
+		},
+		{
+			name:             "ClusterRoleBinding is always rejected",
+			targetNamespace:  target,
+			manifest:         makeManifest("ClusterRoleBinding", "crb", target),
+			wantErrCount:     1,
+			wantErrSubstring: "cluster-scoped resource",
+		},
+		{
+			name:             "Node is always rejected",
+			targetNamespace:  target,
+			manifest:         makeManifest("Node", "worker-1", ""),
+			wantErrCount:     1,
+			wantErrSubstring: "cluster-scoped resource",
+		},
+		{
+			name:             "PersistentVolume is always rejected",
+			targetNamespace:  target,
+			manifest:         makeManifest("PersistentVolume", "pv-data", ""),
+			wantErrCount:     1,
+			wantErrSubstring: "cluster-scoped resource",
+		},
+		{
+			name:             "CustomResourceDefinition is always rejected",
+			targetNamespace:  target,
+			manifest:         makeManifest("CustomResourceDefinition", "my.crd.io", ""),
+			wantErrCount:     1,
+			wantErrSubstring: "cluster-scoped resource",
+		},
+		{
+			name:            "AllowCrossNamespace bypasses check for mismatched namespace",
+			targetNamespace: target,
+			manifest:        makeManifest("ConfigMap", "cross", "other-tenant"),
+			allowCrossNS:    true,
+			wantErrCount:    0,
+		},
+		{
+			name:            "AllowCrossNamespace bypasses check for empty namespace",
+			targetNamespace: target,
+			manifest:        makeManifest("Deployment", "cross-deploy", ""),
+			allowCrossNS:    true,
+			wantErrCount:    0,
+		},
+		{
+			name:            "AllowCrossNamespace bypasses check for cluster-scoped kind",
+			targetNamespace: target,
+			manifest:        makeManifest("ClusterRole", "admin", ""),
+			allowCrossNS:    true,
+			wantErrCount:    0,
+		},
+		{
+			name:            "Deployment with correct namespace passes",
+			targetNamespace: "production",
+			manifest:        makeManifest("Deployment", "api-server", "production"),
+			wantErrCount:    0,
+		},
+		{
+			name:             "Deployment targeting kube-system rejected",
+			targetNamespace:  "staging",
+			manifest:         makeManifest("Deployment", "kube-dns-override", "kube-system"),
+			wantErrCount:     1,
+			wantErrSubstring: "cross-namespace writes are not allowed",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// We don't need a real client for EnforceNamespace; pass a nil-safe
+			// fake built from an empty scheme.
+			scheme := buildFakeScheme(t)
+			c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+			opts := []ManifestValidatorOption{}
+			if tc.allowCrossNS {
+				opts = append(opts, WithAllowCrossNamespace(true))
+			}
+			v := NewManifestValidator(c, opts...)
+
+			errs := v.EnforceNamespace(tc.targetNamespace, tc.manifest)
+
+			if tc.wantErrCount == 0 {
+				if len(errs) != 0 {
+					t.Errorf("expected no errors, got %d: %v", len(errs), errs)
+				}
+				return
+			}
+
+			if len(errs) != tc.wantErrCount {
+				t.Errorf("error count = %d, want %d; errors: %v", len(errs), tc.wantErrCount, errs)
+				return
+			}
+			if tc.wantErrSubstring != "" && !strings.Contains(errs[0], tc.wantErrSubstring) {
+				t.Errorf("error[0] = %q, want substring %q", errs[0], tc.wantErrSubstring)
+			}
+		})
+	}
+}
+
+// TestEnforceNamespace_PreservesExistingValidatorBehavior verifies that adding
+// namespace enforcement did not change the behaviour of ValidateYAML for valid
+// and invalid inputs (regression guard for existing tests).
+func TestEnforceNamespace_PreservesExistingValidatorBehavior(t *testing.T) {
+	scheme := buildFakeScheme(t)
+	ctx := context.Background()
+
+	t.Run("ValidateYAML still rejects empty YAML after enforcement wiring", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(scheme).Build()
+		v := NewManifestValidator(c)
+		_, err := v.ValidateYAML(ctx, "")
+		if err == nil {
+			t.Error("expected error for empty YAML, got nil")
+		}
+	})
+
+	t.Run("ValidateYAML still rejects garbage YAML after enforcement wiring", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(scheme).Build()
+		v := NewManifestValidator(c)
+		_, err := v.ValidateYAML(ctx, "{{{{not yaml}}}}")
+		if err == nil {
+			t.Error("expected error for malformed YAML, got nil")
+		}
+	})
+
+	t.Run("ValidateYAML still accepts a valid ConfigMap manifest", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(scheme).Build()
+		v := NewManifestValidator(c)
+		got, err := v.ValidateYAML(ctx, `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: regression-check
+  namespace: staging
+data:
+  ok: "true"
+`)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.Kind != "ConfigMap" {
+			t.Errorf("Kind = %q, want ConfigMap", got.Kind)
+		}
+		if got.Name != "regression-check" {
+			t.Errorf("Name = %q, want regression-check", got.Name)
+		}
+	})
 }

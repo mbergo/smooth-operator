@@ -30,6 +30,15 @@ serviceAccount:
 rbac:
   # -- Create cluster-scoped Role/RoleBindings required by the operator.
   create: true
+  # -- Scope controls whether the operator is granted cluster-wide or
+  # per-namespace RBAC. Accepted values: "cluster" (default, backward-compatible)
+  # or "namespaced". When set to "namespaced" a Role + RoleBinding is created in
+  # each namespace listed in watchNamespaces instead of a ClusterRole.
+  scope: cluster
+  # -- Namespaces the operator is allowed to manage. Empty list combined with
+  # scope=cluster means all namespaces (current behavior). Required when
+  # scope=namespaced; each entry receives its own Role + RoleBinding.
+  watchNamespaces: []
 
 crds:
   # -- Install CRDs as part of the chart. Set to false if installing CRDs separately.

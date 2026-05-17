@@ -394,6 +394,68 @@ func TestEngine_EvaluatedPoliciesCount(t *testing.T) {
 	}
 }
 
+func TestEngine_SetSeverity_RejectsInvalidValues(t *testing.T) {
+	tests := []struct {
+		name       string
+		policy     string
+		severity   string
+		wantReturn bool
+	}{
+		{
+			name:       "valid lowercase blocking is accepted",
+			policy:     "resource-limits-required",
+			severity:   "blocking",
+			wantReturn: true,
+		},
+		{
+			name:       "BLOCKING normalizes to blocking and is accepted",
+			policy:     "resource-limits-required",
+			severity:   "BLOCKING",
+			wantReturn: true,
+		},
+		{
+			name:       "valid lowercase warning is accepted",
+			policy:     "resource-limits-required",
+			severity:   "warning",
+			wantReturn: true,
+		},
+		{
+			name:       "WARNING normalizes to warning and is accepted",
+			policy:     "resource-limits-required",
+			severity:   "WARNING",
+			wantReturn: true,
+		},
+		{
+			name:       "invalid severity is rejected",
+			policy:     "resource-limits-required",
+			severity:   "invalid",
+			wantReturn: false,
+		},
+		{
+			name:       "empty severity is rejected",
+			policy:     "resource-limits-required",
+			severity:   "",
+			wantReturn: false,
+		},
+		{
+			name:       "whitespace-only severity is rejected",
+			policy:     "resource-limits-required",
+			severity:   "   ",
+			wantReturn: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			engine := NewEngine()
+			got := engine.SetSeverity(tc.policy, tc.severity)
+			if got != tc.wantReturn {
+				t.Errorf("SetSeverity(%q, %q) = %v, want %v", tc.policy, tc.severity, got, tc.wantReturn)
+			}
+		})
+	}
+}
+
 // stubPolicy is a test-only Policy implementation.
 type stubPolicy struct {
 	name     string

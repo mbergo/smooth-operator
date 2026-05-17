@@ -19,6 +19,7 @@ package policy
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -80,20 +81,89 @@ type PolicyResult struct {
 	SuggestedFix string
 }
 
-// NewEngine creates a new policy engine with default policies
+// NewEngine creates a new policy engine with default policies.
+//
+// ResourceLimitsPolicy, LivenessProbePolicy, and ReadinessProbePolicy default
+// to severity "warning" so that existing callers are not disrupted. Use
+// NewStrictEngine or Engine.SetSeverity to promote individual policies to
+// "blocking" for production deployments.
 func NewEngine() *Engine {
 	return &Engine{
 		policies: []Policy{
+			// Kind allowlist must be evaluated first so that high-risk Kinds are
+			// rejected before any other policy attempts to inspect their fields.
+			&KindAllowlistPolicy{},
 			&RunAsNonRootPolicy{},
-			&ResourceLimitsPolicy{},
-			&ReadinessProbePolicy{},
-			&LivenessProbePolicy{},
+			&ResourceLimitsPolicy{},   // severity: warning (default)
+			&ReadinessProbePolicy{},   // severity: warning (default)
+			&LivenessProbePolicy{},    // severity: warning (default)
 			&ImageRegistryPolicy{},
 			&HostPathPolicy{},
 			&PrivilegedContainerPolicy{},
 			&LoadBalancerInternalAnnotationPolicy{},
 		},
 	}
+}
+
+// NewStrictEngine creates a policy engine with ResourceLimitsPolicy,
+// LivenessProbePolicy, and ReadinessProbePolicy promoted to "blocking".
+//
+// Strict mode is recommended for production clusters: it ensures the prompt's
+// enforcement guarantees match the engine's actual gating behaviour, closing
+// the gap identified in the security audit.
+func NewStrictEngine() *Engine {
+	return &Engine{
+		policies: []Policy{
+			// Kind allowlist must be evaluated first.
+			&KindAllowlistPolicy{},
+			&RunAsNonRootPolicy{},
+			new(ResourceLimitsPolicy).WithSeverity("blocking"),
+			new(ReadinessProbePolicy).WithSeverity("blocking"),
+			new(LivenessProbePolicy).WithSeverity("blocking"),
+			&ImageRegistryPolicy{},
+			&HostPathPolicy{},
+			&PrivilegedContainerPolicy{},
+			&LoadBalancerInternalAnnotationPolicy{},
+		},
+	}
+}
+
+// severitySetter is a private interface satisfied by policies whose severity
+// can be reconfigured at runtime (ResourceLimitsPolicy, ReadinessProbePolicy,
+// LivenessProbePolicy). It is intentionally not exported; callers should use
+// Engine.SetSeverity instead.
+type severitySetter interface {
+	// setSeverity updates the policy's severity in-place.
+	setSeverity(s string)
+}
+
+// SetSeverity updates the severity of the named policy in the engine's
+// registered policy list. It returns true when the policy was found and
+// updated, false when no policy with that name is registered.
+//
+// Only policies that support runtime severity mutation (ResourceLimitsPolicy,
+// ReadinessProbePolicy, LivenessProbePolicy) respond to this call; all others
+// are silently skipped so that a single call to SetSeverity("run-as-non-root",
+// "warning") is safe even though RunAsNonRootPolicy has a fixed severity.
+func (e *Engine) SetSeverity(policyName, severity string) bool {
+	severity = strings.ToLower(strings.TrimSpace(severity))
+	if severity != "blocking" && severity != "warning" {
+		return false
+	}
+	for _, p := range e.policies {
+		if p.Name() != policyName {
+			continue
+		}
+		if ss, ok := p.(severitySetter); ok {
+			ss.setSeverity(severity)
+			return true
+		}
+		// Policy found but does not support runtime mutation — still report
+		// found=true so callers can distinguish "unknown policy" from "policy
+		// with fixed severity".
+		return true
+	}
+	return false
 }
 
 // EvaluateManifest runs all policies against a manifest

@@ -24,6 +24,13 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
+// Kubernetes resource kind and severity constants used across policies.
+const (
+	kindDeployment  = "Deployment"
+	kindPod         = "Pod"
+	severityWarning = "warning"
+)
+
 // RunAsNonRootPolicy enforces that containers must run as non-root
 type RunAsNonRootPolicy struct{}
 
@@ -36,7 +43,7 @@ func (p *RunAsNonRootPolicy) Severity() string {
 }
 
 func (p *RunAsNonRootPolicy) Evaluate(ctx context.Context, obj *unstructured.Unstructured) *PolicyResult {
-	if obj.GetKind() != "Deployment" && obj.GetKind() != "Pod" {
+	if obj.GetKind() != kindDeployment && obj.GetKind() != kindPod {
 		return &PolicyResult{Passed: true, PolicyName: p.Name()}
 	}
 
@@ -79,11 +86,11 @@ func (p *ResourceLimitsPolicy) Name() string {
 }
 
 func (p *ResourceLimitsPolicy) Severity() string {
-	return "warning"
+	return severityWarning
 }
 
 func (p *ResourceLimitsPolicy) Evaluate(ctx context.Context, obj *unstructured.Unstructured) *PolicyResult {
-	if obj.GetKind() != "Deployment" {
+	if obj.GetKind() != kindDeployment {
 		return &PolicyResult{Passed: true, PolicyName: p.Name()}
 	}
 
@@ -144,11 +151,11 @@ func (p *ReadinessProbePolicy) Name() string {
 }
 
 func (p *ReadinessProbePolicy) Severity() string {
-	return "warning"
+	return severityWarning
 }
 
 func (p *ReadinessProbePolicy) Evaluate(ctx context.Context, obj *unstructured.Unstructured) *PolicyResult {
-	if obj.GetKind() != "Deployment" {
+	if obj.GetKind() != kindDeployment {
 		return &PolicyResult{Passed: true, PolicyName: p.Name()}
 	}
 
@@ -186,11 +193,11 @@ func (p *LivenessProbePolicy) Name() string {
 }
 
 func (p *LivenessProbePolicy) Severity() string {
-	return "warning"
+	return severityWarning
 }
 
 func (p *LivenessProbePolicy) Evaluate(ctx context.Context, obj *unstructured.Unstructured) *PolicyResult {
-	if obj.GetKind() != "Deployment" {
+	if obj.GetKind() != kindDeployment {
 		return &PolicyResult{Passed: true, PolicyName: p.Name()}
 	}
 
@@ -232,7 +239,7 @@ func (p *ImageRegistryPolicy) Severity() string {
 }
 
 func (p *ImageRegistryPolicy) Evaluate(ctx context.Context, obj *unstructured.Unstructured) *PolicyResult {
-	if obj.GetKind() != "Deployment" {
+	if obj.GetKind() != kindDeployment {
 		return &PolicyResult{Passed: true, PolicyName: p.Name()}
 	}
 
@@ -295,7 +302,7 @@ func (p *HostPathPolicy) Severity() string {
 }
 
 func (p *HostPathPolicy) Evaluate(ctx context.Context, obj *unstructured.Unstructured) *PolicyResult {
-	if obj.GetKind() != "Deployment" && obj.GetKind() != "Pod" {
+	if obj.GetKind() != kindDeployment && obj.GetKind() != kindPod {
 		return &PolicyResult{Passed: true, PolicyName: p.Name()}
 	}
 
@@ -397,7 +404,7 @@ func (p *PrivilegedContainerPolicy) Severity() string {
 }
 
 func (p *PrivilegedContainerPolicy) Evaluate(ctx context.Context, obj *unstructured.Unstructured) *PolicyResult {
-	if obj.GetKind() != "Deployment" && obj.GetKind() != "Pod" {
+	if obj.GetKind() != kindDeployment && obj.GetKind() != kindPod {
 		return &PolicyResult{Passed: true, PolicyName: p.Name()}
 	}
 

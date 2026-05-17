@@ -34,16 +34,16 @@ type RolloutWatcher struct {
 }
 
 // NewRolloutWatcher creates a new rollout watcher
-func NewRolloutWatcher(client client.Client, options ExecutorOptions) *RolloutWatcher {
+func NewRolloutWatcher(c client.Client, options ExecutorOptions) *RolloutWatcher {
 	return &RolloutWatcher{
-		client:  client,
+		client:  c,
 		options: options,
 	}
 }
 
 // WatchRollouts monitors rollout progress for all applied Deployments
 func (w *RolloutWatcher) WatchRollouts(ctx context.Context, applied []AppliedResource) ([]RolloutStatus, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	results := []RolloutStatus{}
 
@@ -53,11 +53,11 @@ func (w *RolloutWatcher) WatchRollouts(ctx context.Context, applied []AppliedRes
 			continue
 		}
 
-		log.Info("Watching rollout", "deployment", resource.Name, "namespace", resource.Namespace)
+		logger.Info("Watching rollout", "deployment", resource.Name, "namespace", resource.Namespace)
 
 		status, err := w.watchDeploymentRollout(ctx, resource.Namespace, resource.Name)
 		if err != nil {
-			log.Error(err, "Failed to watch rollout", "deployment", resource.Name)
+			logger.Error(err, "Failed to watch rollout", "deployment", resource.Name)
 			status = &RolloutStatus{
 				DeploymentName: resource.Name,
 				Namespace:      resource.Namespace,
@@ -76,7 +76,7 @@ func (w *RolloutWatcher) WatchRollouts(ctx context.Context, applied []AppliedRes
 
 // watchDeploymentRollout watches a single Deployment until complete or timeout
 func (w *RolloutWatcher) watchDeploymentRollout(ctx context.Context, namespace, name string) (*RolloutStatus, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	status := &RolloutStatus{
 		DeploymentName: name,
@@ -99,7 +99,7 @@ func (w *RolloutWatcher) watchDeploymentRollout(ctx context.Context, namespace, 
 			// Timeout reached
 			status.State = "timedout"
 			status.CompletedAt = time.Now()
-			log.Info("Rollout timed out",
+			logger.Info("Rollout timed out",
 				"deployment", name,
 				"timeout", w.options.RolloutTimeout.String(),
 			)
@@ -139,7 +139,7 @@ func (w *RolloutWatcher) watchDeploymentRollout(ctx context.Context, namespace, 
 				if healthChecksPassed {
 					status.State = "complete"
 					status.CompletedAt = time.Now()
-					log.Info("Rollout complete",
+					logger.Info("Rollout complete",
 						"deployment", name,
 						"duration", time.Since(status.StartedAt).String(),
 					)
@@ -148,7 +148,7 @@ func (w *RolloutWatcher) watchDeploymentRollout(ctx context.Context, namespace, 
 
 				// Health checks failed
 				failedChecks++
-				log.Info("Health checks failed",
+				logger.Info("Health checks failed",
 					"deployment", name,
 					"failedChecks", failedChecks,
 					"threshold", w.options.FailureThreshold,
@@ -157,12 +157,12 @@ func (w *RolloutWatcher) watchDeploymentRollout(ctx context.Context, namespace, 
 				if failedChecks >= w.options.FailureThreshold {
 					status.State = "failed"
 					status.CompletedAt = time.Now()
-					log.Info("Rollout failed (health check threshold exceeded)", "deployment", name)
+					logger.Info("Rollout failed (health check threshold exceeded)", "deployment", name)
 					return status, nil
 				}
 			}
 
-			log.V(1).Info("Rollout in progress",
+			logger.V(1).Info("Rollout in progress",
 				"deployment", name,
 				"ready", deployment.Status.ReadyReplicas,
 				"desired", *deployment.Spec.Replicas,
@@ -173,7 +173,7 @@ func (w *RolloutWatcher) watchDeploymentRollout(ctx context.Context, namespace, 
 
 // checkPodHealth verifies that pods are healthy and ready
 func (w *RolloutWatcher) checkPodHealth(ctx context.Context, namespace string, deployment *appsv1.Deployment) (bool, []HealthCheckResult) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	// Get pods for this deployment
 	podList := &corev1.PodList{}
@@ -182,7 +182,7 @@ func (w *RolloutWatcher) checkPodHealth(ctx context.Context, namespace string, d
 	}, client.MatchingLabels(deployment.Spec.Selector.MatchLabels))
 
 	if err != nil {
-		log.Error(err, "Failed to list pods for health check")
+		logger.Error(err, "Failed to list pods for health check")
 		return false, []HealthCheckResult{}
 	}
 
@@ -238,7 +238,7 @@ func (w *RolloutWatcher) checkPodHealth(ctx context.Context, namespace string, d
 		}
 	}
 
-	log.Info("Health check complete",
+	logger.Info("Health check complete",
 		"deployment", deployment.Name,
 		"totalPods", len(podList.Items),
 		"healthy", allHealthy,

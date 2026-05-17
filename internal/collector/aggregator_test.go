@@ -34,13 +34,6 @@ import (
 	"github.com/mbergo/smooth-operator/internal/metrics"
 )
 
-// notAvailableMarker is the error text embedded in MetricsSnapshot/LogSummary
-// when the respective client is not enabled.
-const (
-	prometheusNotEnabledMarker = "Prometheus client is not enabled"
-	lokiNotEnabledMarker       = "Loki client is not enabled"
-)
-
 // newDisabledPrometheus creates a PrometheusClient with Enabled=false (no address needed).
 func newDisabledPrometheus(t *testing.T) *metrics.PrometheusClient {
 	t.Helper()
@@ -123,7 +116,7 @@ func promStubHandler() http.Handler {
 		}
 		// Return a successful empty vector result.
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintln(w, `{"status":"success","data":{"resultType":"vector","result":[]}}`)
+		_, _ = fmt.Fprintln(w, `{"status":"success","data":{"resultType":"vector","result":[]}}`)
 	})
 }
 

@@ -1,6 +1,6 @@
 module github.com/mbergo/smooth-operator
 
-go 1.24.5
+go 1.24.8
 
 require (
 	github.com/go-git/go-git/v5 v5.16.3

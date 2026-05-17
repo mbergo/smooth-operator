@@ -88,8 +88,10 @@ func newDeployment(name, namespace string, labels map[string]string) *appsv1.Dep
 	}
 }
 
-// newPod returns a minimal Pod for testing.
-func newPod(name, namespace string, labels map[string]string, phase corev1.PodPhase) *corev1.Pod {
+// newPod returns a minimal Pod for testing. The phase parameter is exposed so
+// future tests can exercise non-Running pods, even though current callers
+// always pass corev1.PodRunning.
+func newPod(name, namespace string, labels map[string]string, phase corev1.PodPhase) *corev1.Pod { //nolint:unparam // phase is parameterized for future use
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,

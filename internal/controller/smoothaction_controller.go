@@ -93,7 +93,7 @@ func (r *SmoothActionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Fetch the SmoothAction instance
 	smoothAction := &smoothv1.SmoothAction{}
-	err := r.Client.Get(ctx, req.NamespacedName, smoothAction)
+	err := r.Get(ctx, req.NamespacedName, smoothAction)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Info("SmoothAction not found, ignoring")
@@ -112,10 +112,10 @@ func (r *SmoothActionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Initialize status if not set
 	if smoothAction.Status.State == "" {
 		if smoothAction.Spec.Mode == "auto" {
-			smoothAction.Status.State = "Proposed"
+			smoothAction.Status.State = stateProposed
 			r.Recorder.Event(smoothAction, "Normal", "Proposed", "SmoothAction proposed for auto-execution")
 		} else {
-			smoothAction.Status.State = "Proposed"
+			smoothAction.Status.State = stateProposed
 			r.Recorder.Event(smoothAction, "Normal", "Proposed", "SmoothAction proposed, awaiting approval")
 		}
 
@@ -142,7 +142,7 @@ func (r *SmoothActionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// execution block below can re-attempt the operation on this requeue.
 	if smoothAction.Status.State == "GitError" {
 		log.Info("Retrying after GitError; resetting state to Proposed")
-		smoothAction.Status.State = "Proposed"
+		smoothAction.Status.State = stateProposed
 		if statusErr := r.Status().Update(ctx, smoothAction); statusErr != nil {
 			log.Error(statusErr, "Failed to reset GitError state")
 			return ctrl.Result{}, statusErr
@@ -151,7 +151,7 @@ func (r *SmoothActionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// SUGGEST MODE: Wait for approval
-	if smoothAction.Spec.Mode == "suggest" && smoothAction.Status.State == "Proposed" {
+	if smoothAction.Spec.Mode == "suggest" && smoothAction.Status.State == stateProposed {
 		if smoothAction.Spec.Approval.Required && smoothAction.Spec.Approval.ApprovedBy == "" {
 			log.Info("Waiting for approval (suggest mode)")
 			// Requeue to check for approval
@@ -168,7 +168,7 @@ func (r *SmoothActionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// AUTO MODE or APPROVED SUGGEST MODE: Execute
 	if (smoothAction.Spec.Mode == "auto" || smoothAction.Spec.Approval.ApprovedBy != "") &&
-		smoothAction.Status.State == "Proposed" {
+		smoothAction.Status.State == stateProposed {
 
 		log.Info("Executing SmoothAction", "mode", smoothAction.Spec.Mode)
 

@@ -34,7 +34,11 @@ jobs:
 
       - name: Prepare envtest assets
         run: |
-          KUBEBUILDER_ASSETS=$(setup-envtest use --bin-dir bin -p path)
+          # Use an absolute path so packages running tests from
+          # subdirectories (notably internal/controller) can still locate
+          # the envtest binaries.
+          mkdir -p "$GITHUB_WORKSPACE/bin"
+          KUBEBUILDER_ASSETS=$(setup-envtest use --bin-dir "$GITHUB_WORKSPACE/bin" -p path)
           echo "KUBEBUILDER_ASSETS=$KUBEBUILDER_ASSETS" >> $GITHUB_ENV
 
       - name: Run tests with coverage

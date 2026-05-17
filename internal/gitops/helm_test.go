@@ -141,7 +141,6 @@ func TestGenerateTemplate_HPA(t *testing.T) {
 	gen := NewHelmChartGenerator()
 
 	for _, kind := range []string{"HorizontalPodAutoscaler", "HPA"} {
-		kind := kind
 		t.Run(kind, func(t *testing.T) {
 			t.Parallel()
 			out := gen.generateTemplate(makeResource(kind, "hpa-test"))

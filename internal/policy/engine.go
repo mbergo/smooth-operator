@@ -103,9 +103,9 @@ func NewEngine() *Engine {
 
 // EvaluateManifest runs all policies against a manifest
 func (e *Engine) EvaluateManifest(ctx context.Context, obj *unstructured.Unstructured, kind, name, namespace string) (*PolicyEvaluationResult, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
-	log.Info("Evaluating policies",
+	logger.Info("Evaluating policies",
 		"kind", kind,
 		"name", name,
 		"policyCount", len(e.policies),
@@ -137,7 +137,7 @@ func (e *Engine) EvaluateManifest(ctx context.Context, obj *unstructured.Unstruc
 				result.Passed = false
 			}
 
-			log.Info("Policy violation detected",
+			logger.Info("Policy violation detected",
 				"policy", policyResult.PolicyName,
 				"severity", policyResult.Severity,
 				"resource", fmt.Sprintf("%s/%s", kind, name),
@@ -146,12 +146,12 @@ func (e *Engine) EvaluateManifest(ctx context.Context, obj *unstructured.Unstruc
 	}
 
 	if result.Passed {
-		log.Info("All policies passed",
+		logger.Info("All policies passed",
 			"kind", kind,
 			"name", name,
 		)
 	} else {
-		log.Info("Policy violations found",
+		logger.Info("Policy violations found",
 			"kind", kind,
 			"name", name,
 			"blockingViolations", len(result.Violations),

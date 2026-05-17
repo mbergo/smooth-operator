@@ -35,10 +35,10 @@ type Planner struct {
 }
 
 // NewPlanner creates a new planner
-func NewPlanner(client client.Client, riskOptions RiskAssessorOptions) *Planner {
+func NewPlanner(c client.Client, riskOptions RiskAssessorOptions) *Planner {
 	return &Planner{
-		validator:     NewManifestValidator(client),
-		diffGenerator: NewDiffGenerator(client),
+		validator:     NewManifestValidator(c),
+		diffGenerator: NewDiffGenerator(c),
 		policyEngine:  policy.NewEngine(),
 		riskAssessor:  NewRiskAssessor(riskOptions),
 	}
@@ -51,9 +51,9 @@ func (p *Planner) CreatePlan(
 	targetNamespace string,
 	autoModeRequested bool,
 ) (*Plan, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
-	log.Info("Creating execution plan",
+	logger.Info("Creating execution plan",
 		"patches", len(llmResponse.Patches),
 		"targetNamespace", targetNamespace,
 		"autoMode", autoModeRequested,
@@ -68,13 +68,13 @@ func (p *Planner) CreatePlan(
 
 	// Step 1: Validate each manifest
 	for i, patch := range llmResponse.Patches {
-		log.V(1).Info("Validating manifest", "index", i, "kind", patch.Kind)
+		logger.V(1).Info("Validating manifest", "index", i, "kind", patch.Kind)
 
 		validated, err := p.validator.ValidateYAML(ctx, patch.YAML)
 		if err != nil {
 			errMsg := fmt.Sprintf("Manifest %d (%s) validation failed: %v", i, patch.Kind, err)
 			plan.Errors = append(plan.Errors, errMsg)
-			log.Error(err, "Manifest validation failed", "index", i, "kind", patch.Kind)
+			logger.Error(err, "Manifest validation failed", "index", i, "kind", patch.Kind)
 			continue
 		}
 
@@ -83,7 +83,7 @@ func (p *Planner) CreatePlan(
 		if err != nil {
 			errMsg := fmt.Sprintf("Diff generation failed for %s/%s: %v", validated.Kind, validated.Name, err)
 			plan.Warnings = append(plan.Warnings, errMsg)
-			log.Error(err, "Diff generation failed", "kind", validated.Kind, "name", validated.Name)
+			logger.Error(err, "Diff generation failed", "kind", validated.Kind, "name", validated.Name)
 		} else {
 			plan.Diffs = append(plan.Diffs, *diff)
 		}
@@ -105,7 +105,7 @@ func (p *Planner) CreatePlan(
 		if err != nil {
 			errMsg := fmt.Sprintf("Policy evaluation failed for %s/%s: %v", validated.Kind, validated.Name, err)
 			plan.Errors = append(plan.Errors, errMsg)
-			log.Error(err, "Policy evaluation failed")
+			logger.Error(err, "Policy evaluation failed")
 			continue
 		}
 
@@ -133,7 +133,7 @@ func (p *Planner) CreatePlan(
 		autoModeRequested,
 	)
 
-	log.Info("Plan created",
+	logger.Info("Plan created",
 		"manifests", len(plan.Manifests),
 		"diffs", len(plan.Diffs),
 		"policyViolations", len(plan.PolicyResults.Violations),

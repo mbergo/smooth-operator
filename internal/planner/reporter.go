@@ -65,7 +65,7 @@ func (r *Reporter) FormatPlanSummary(plan *Plan) string {
 		warningCount := 0
 
 		for _, violation := range plan.PolicyResults.Violations {
-			if violation.Severity == "blocking" {
+			if violation.Severity == severityBlocking {
 				blockingCount++
 			} else {
 				warningCount++
@@ -77,7 +77,7 @@ func (r *Reporter) FormatPlanSummary(plan *Plan) string {
 
 		for i, violation := range plan.PolicyResults.Violations {
 			icon := "⚠️ "
-			if violation.Severity == "blocking" {
+			if violation.Severity == severityBlocking {
 				icon = "❌"
 			}
 			builder.WriteString(fmt.Sprintf("  %d. %s [%s] %s\n", i+1, icon, violation.Policy, violation.Message))
@@ -140,7 +140,7 @@ func (r *Reporter) FormatPolicyViolations(violations []policy.PolicyViolation) s
 	warnings := []policy.PolicyViolation{}
 
 	for _, v := range violations {
-		if v.Severity == "blocking" {
+		if v.Severity == severityBlocking {
 			blocking = append(blocking, v)
 		} else {
 			warnings = append(warnings, v)

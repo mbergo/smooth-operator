@@ -34,15 +34,15 @@ type DiffGenerator struct {
 }
 
 // NewDiffGenerator creates a new diff generator
-func NewDiffGenerator(client client.Client) *DiffGenerator {
+func NewDiffGenerator(c client.Client) *DiffGenerator {
 	return &DiffGenerator{
-		client: client,
+		client: c,
 	}
 }
 
 // GenerateDiff creates a diff for a validated manifest
 func (d *DiffGenerator) GenerateDiff(ctx context.Context, manifest *ValidatedManifest) (*ManifestDiff, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	diff := &ManifestDiff{
 		Kind:          manifest.Kind,
@@ -59,7 +59,7 @@ func (d *DiffGenerator) GenerateDiff(ctx context.Context, manifest *ValidatedMan
 		diff.Summary = fmt.Sprintf("Creating new %s: %s", manifest.Kind, manifest.Name)
 		diff.UnifiedDiff = d.generateUnifiedDiff("", manifest.YAML, manifest.Kind, manifest.Name)
 
-		log.Info("Generated diff for new resource",
+		logger.Info("Generated diff for new resource",
 			"kind", manifest.Kind,
 			"name", manifest.Name,
 		)
@@ -95,7 +95,7 @@ func (d *DiffGenerator) GenerateDiff(ctx context.Context, manifest *ValidatedMan
 	diff.Summary = fmt.Sprintf("Updating %s: %s (%d fields changed)",
 		manifest.Kind, manifest.Name, len(diff.ChangedFields))
 
-	log.Info("Generated diff for existing resource",
+	logger.Info("Generated diff for existing resource",
 		"kind", manifest.Kind,
 		"name", manifest.Name,
 		"changedFields", len(diff.ChangedFields),

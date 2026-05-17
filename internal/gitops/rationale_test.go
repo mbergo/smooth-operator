@@ -82,7 +82,7 @@ func buildMinimalInputs() (
 		ExecutionTime: 2 * time.Second,
 	}
 
-	return
+	return chatSession, userPrompt, llmResp, plan, result
 }
 
 // ---------------------------------------------------------------------------

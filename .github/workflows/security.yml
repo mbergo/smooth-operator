@@ -68,7 +68,8 @@ jobs:
         run: make docker-build IMG=smooth-operator:scan
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@0.28.0
+        # Pinned to commit SHA for v0.35.0 (supply-chain hardening).
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1
         with:
           image-ref: smooth-operator:scan
           format: sarif

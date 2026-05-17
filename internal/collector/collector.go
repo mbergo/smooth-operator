@@ -37,17 +37,17 @@ type Collector struct {
 }
 
 // NewCollector creates a new Collector instance
-func NewCollector(client client.Client, options CollectorOptions) *Collector {
+func NewCollector(c client.Client, options CollectorOptions) *Collector {
 	return &Collector{
-		client:  client,
+		client:  c,
 		options: options,
 	}
 }
 
 // CollectContext gathers all relevant cluster context for a given namespace
 func (c *Collector) CollectContext(ctx context.Context, namespace, chatSessionName string) (*ClusterContext, error) {
-	log := log.FromContext(ctx)
-	log.Info("Starting cluster context collection",
+	logger := log.FromContext(ctx)
+	logger.Info("Starting cluster context collection",
 		"namespace", namespace,
 		"chatSession", chatSessionName,
 	)
@@ -63,44 +63,44 @@ func (c *Collector) CollectContext(ctx context.Context, namespace, chatSessionNa
 	deployments, err := c.collectDeployments(ctx, namespace)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to collect Deployments: %v", err)
-		log.Error(err, "Deployment collection failed")
+		logger.Error(err, "Deployment collection failed")
 		clusterCtx.Errors = append(clusterCtx.Errors, errMsg)
 	} else {
 		clusterCtx.Deployments = deployments
-		log.Info("Collected Deployments", "count", len(deployments))
+		logger.Info("Collected Deployments", "count", len(deployments))
 	}
 
 	// Collect Services
 	services, err := c.collectServices(ctx, namespace)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to collect Services: %v", err)
-		log.Error(err, "Service collection failed")
+		logger.Error(err, "Service collection failed")
 		clusterCtx.Errors = append(clusterCtx.Errors, errMsg)
 	} else {
 		clusterCtx.Services = services
-		log.Info("Collected Services", "count", len(services))
+		logger.Info("Collected Services", "count", len(services))
 	}
 
 	// Collect Ingresses
 	ingresses, err := c.collectIngresses(ctx, namespace)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to collect Ingresses: %v", err)
-		log.Error(err, "Ingress collection failed")
+		logger.Error(err, "Ingress collection failed")
 		clusterCtx.Errors = append(clusterCtx.Errors, errMsg)
 	} else {
 		clusterCtx.Ingresses = ingresses
-		log.Info("Collected Ingresses", "count", len(ingresses))
+		logger.Info("Collected Ingresses", "count", len(ingresses))
 	}
 
 	// Collect Pods
 	pods, err := c.collectPods(ctx, namespace)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to collect Pods: %v", err)
-		log.Error(err, "Pod collection failed")
+		logger.Error(err, "Pod collection failed")
 		clusterCtx.Errors = append(clusterCtx.Errors, errMsg)
 	} else {
 		clusterCtx.Pods = pods
-		log.Info("Collected Pods", "count", len(pods))
+		logger.Info("Collected Pods", "count", len(pods))
 	}
 
 	// Collect Events (if enabled)
@@ -108,15 +108,15 @@ func (c *Collector) CollectContext(ctx context.Context, namespace, chatSessionNa
 		events, err := c.collectEvents(ctx, namespace)
 		if err != nil {
 			errMsg := fmt.Sprintf("Failed to collect Events: %v", err)
-			log.Error(err, "Event collection failed")
+			logger.Error(err, "Event collection failed")
 			clusterCtx.Errors = append(clusterCtx.Errors, errMsg)
 		} else {
 			clusterCtx.Events = events
-			log.Info("Collected Events", "count", len(events))
+			logger.Info("Collected Events", "count", len(events))
 		}
 	}
 
-	log.Info("Cluster context collection complete",
+	logger.Info("Cluster context collection complete",
 		"deployments", len(clusterCtx.Deployments),
 		"services", len(clusterCtx.Services),
 		"ingresses", len(clusterCtx.Ingresses),

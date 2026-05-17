@@ -73,25 +73,27 @@ func (g *GitClient) CommitAndPush(
 	rationale string,
 	chatSessionID string,
 ) (*GitCommitResult, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	result := &GitCommitResult{
 		Success: false,
 		Errors:  []string{},
 	}
 
-	log.Info("Starting Git operations",
+	logger.Info("Starting Git operations",
 		"repo", options.RepoURL,
 		"mode", options.CommitMode,
 	)
 
 	// Create temporary directory for repo
 	repoPath := filepath.Join(g.workDir, chatSessionID)
-	os.RemoveAll(repoPath) // Clean up any previous attempts
-	os.MkdirAll(repoPath, 0755)
+	_ = os.RemoveAll(repoPath) // Clean up any previous attempts
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		return result, fmt.Errorf("failed to create work dir: %w", err)
+	}
 
 	// Clone repository
-	log.Info("Cloning repository", "url", options.RepoURL)
+	logger.Info("Cloning repository", "url", options.RepoURL)
 	repo, err := git.PlainClone(repoPath, false, &git.CloneOptions{
 		URL:      options.RepoURL,
 		Progress: nil,
@@ -105,7 +107,7 @@ func (g *GitClient) CommitAndPush(
 	branchName := fmt.Sprintf("smooth/%s", chatSessionID)
 	result.Branch = branchName
 
-	log.Info("Creating feature branch", "branch", branchName)
+	logger.Info("Creating feature branch", "branch", branchName)
 	headRef, err := repo.Head()
 	if err != nil {
 		return result, fmt.Errorf("failed to get HEAD: %w", err)
@@ -132,12 +134,17 @@ func (g *GitClient) CommitAndPush(
 
 	// Write Helm chart files
 	chartPath := filepath.Join(repoPath, "charts", chart.Name)
-	os.MkdirAll(chartPath, 0755)
+	if err := os.MkdirAll(chartPath, 0o755); err != nil {
+		return result, fmt.Errorf("failed to create chart dir: %w", err)
+	}
 
 	for filename, content := range chart.Files {
 		filePath := filepath.Join(chartPath, filename)
-		os.MkdirAll(filepath.Dir(filePath), 0755)
-		err := os.WriteFile(filePath, []byte(content), 0644)
+		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("Failed to create dir for %s: %v", filename, err))
+			continue
+		}
+		err := os.WriteFile(filePath, []byte(content), 0o644)
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("Failed to write %s: %v", filename, err))
 			continue
@@ -152,14 +159,14 @@ func (g *GitClient) CommitAndPush(
 	}
 
 	// Stage all changes
-	log.Info("Staging changes")
+	logger.Info("Staging changes")
 	_, err = worktree.Add(".")
 	if err != nil {
 		return result, fmt.Errorf("failed to stage changes: %w", err)
 	}
 
 	// Commit
-	log.Info("Creating commit", "message", options.CommitMessage)
+	logger.Info("Creating commit", "message", options.CommitMessage)
 	commitHash, err := worktree.Commit(options.CommitMessage, &git.CommitOptions{
 		Author: &object.Signature{
 			Name:  "Smooth Operator",
@@ -172,10 +179,10 @@ func (g *GitClient) CommitAndPush(
 	}
 
 	result.CommitSHA = commitHash.String()
-	log.Info("Commit created", "sha", result.CommitSHA[:7])
+	logger.Info("Commit created", "sha", result.CommitSHA[:7])
 
 	// Push to remote
-	log.Info("Pushing to remote", "branch", branchName)
+	logger.Info("Pushing to remote", "branch", branchName)
 	err = repo.Push(&git.PushOptions{
 		RemoteName: "origin",
 		RefSpecs: []config.RefSpec{
@@ -187,24 +194,24 @@ func (g *GitClient) CommitAndPush(
 		result.Warnings = append(result.Warnings, "Changes committed locally but not pushed")
 		// Continue anyway - local commit succeeded
 	} else {
-		log.Info("Pushed successfully")
+		logger.Info("Pushed successfully")
 	}
 
 	// If PR mode, create pull request
 	if options.CommitMode == "pr" {
-		log.Info("Creating pull request")
+		logger.Info("Creating pull request")
 		prURL, err := g.createPullRequest(ctx, options, branchName, chatSessionID)
 		if err != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("PR creation failed: %v", err))
 		} else {
 			result.PRURL = prURL
-			log.Info("Pull request created", "url", prURL)
+			logger.Info("Pull request created", "url", prURL)
 		}
 	}
 
 	result.Success = len(result.Errors) == 0
 
-	log.Info("Git operations complete",
+	logger.Info("Git operations complete",
 		"success", result.Success,
 		"commitSHA", result.CommitSHA[:7],
 		"branch", result.Branch,
@@ -370,7 +377,7 @@ func (g *GitClient) createGitHubPR(
 	if err != nil {
 		return nil, fmt.Errorf("github PR: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusCreated {
@@ -428,7 +435,7 @@ func (g *GitClient) createGitLabMR(
 	if err != nil {
 		return "", fmt.Errorf("gitlab MR: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusCreated {

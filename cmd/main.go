@@ -62,7 +62,10 @@ type gitopsAgentAdapter struct {
 	agent *gitops.Agent
 }
 
-func (a *gitopsAgentAdapter) GenerateAndCommit(_ context.Context, _ *smoothv1.SmoothAction) (*gitops.GitCommitResult, error) {
+func (a *gitopsAgentAdapter) GenerateAndCommit(
+	_ context.Context,
+	_ *smoothv1.SmoothAction,
+) (*gitops.GitCommitResult, error) {
 	// No-op until SmoothAction carries the full execution context required by
 	// the GitOps pipeline. Returning an empty success result keeps the
 	// SmoothAction in the "Applied" state without spuriously moving it to
@@ -167,7 +170,9 @@ func main() {
 		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
-	// Use externally-provided TLS certificates for metrics when metricsCertPath is set; otherwise controller-runtime issues self-signed certs.
+	// Use externally-provided TLS certificates for metrics when
+	// metricsCertPath is set; otherwise controller-runtime issues
+	// self-signed certs.
 	if len(metricsCertPath) > 0 {
 		setupLog.Info("Initializing metrics certificate watcher using provided certificates",
 			"metrics-cert-path", metricsCertPath, "metrics-cert-name", metricsCertName, "metrics-cert-key", metricsCertKey)

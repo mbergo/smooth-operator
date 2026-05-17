@@ -100,10 +100,10 @@ func NewAggregator(
 
 // AggregateContext collects and aggregates all available context
 func (a *Aggregator) AggregateContext(ctx context.Context, namespace, chatSessionName string) (*AggregatedContext, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 	startTime := time.Now()
 
-	log.Info("Starting context aggregation",
+	logger.Info("Starting context aggregation",
 		"namespace", namespace,
 		"chatSession", chatSessionName,
 	)
@@ -126,7 +126,7 @@ func (a *Aggregator) AggregateContext(ctx context.Context, namespace, chatSessio
 		for _, dep := range clusterCtx.Deployments {
 			metricsSnapshot, err := a.metricsClient.CollectMetrics(ctx, namespace, dep.Name, a.metricsWindow)
 			if err != nil {
-				log.Error(err, "Failed to collect metrics for deployment", "deployment", dep.Name)
+				logger.Error(err, "Failed to collect metrics for deployment", "deployment", dep.Name)
 				// Continue with other deployments
 				continue
 			}
@@ -139,7 +139,7 @@ func (a *Aggregator) AggregateContext(ctx context.Context, namespace, chatSessio
 		for _, dep := range clusterCtx.Deployments {
 			logSummary, err := a.logsClient.CollectLogs(ctx, namespace, dep.Name, a.metricsWindow)
 			if err != nil {
-				log.Error(err, "Failed to collect logs for deployment", "deployment", dep.Name)
+				logger.Error(err, "Failed to collect logs for deployment", "deployment", dep.Name)
 				// Continue with other deployments
 				continue
 			}
@@ -152,7 +152,7 @@ func (a *Aggregator) AggregateContext(ctx context.Context, namespace, chatSessio
 
 	aggregated.CollectionDuration = time.Since(startTime)
 
-	log.Info("Context aggregation complete",
+	logger.Info("Context aggregation complete",
 		"duration", aggregated.CollectionDuration.String(),
 		"deployments", aggregated.Summary.TotalDeployments,
 		"metricsCollected", len(aggregated.MetricsSnapshots),

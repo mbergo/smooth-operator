@@ -120,7 +120,7 @@ func (r *ChatSessionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// Check if already completed or failed
-	if chatSession.Status.State == "Completed" || chatSession.Status.State == "Failed" {
+	if chatSession.Status.State == stateCompleted || chatSession.Status.State == stateFailed {
 		log.Info("ChatSession already in terminal state", "state", chatSession.Status.State)
 		return ctrl.Result{}, nil
 	}
@@ -160,7 +160,7 @@ func (r *ChatSessionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		aggregated, err := r.Aggregator.AggregateContext(ctx, chatSession.Spec.TargetNamespace, chatSession.Name)
 		if err != nil {
 			log.Error(err, "Failed to aggregate cluster context")
-			chatSession.Status.State = "Failed"
+			chatSession.Status.State = stateFailed
 			chatSession.Status.Reason = fmt.Sprintf("Context aggregation failed: %v", err)
 			chatSession.Status.LastUpdated = metav1.Now().Format(time.RFC3339)
 
@@ -191,7 +191,7 @@ func (r *ChatSessionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			llmResponse, err := r.LLMClient.GeneratePlan(ctx, chatSession.Spec.Prompt, aggregated)
 			if err != nil {
 				log.Error(err, "LLM plan generation failed")
-				chatSession.Status.State = "Failed"
+				chatSession.Status.State = stateFailed
 				chatSession.Status.Reason = fmt.Sprintf("LLM inference failed: %v", err)
 				chatSession.Status.LastUpdated = metav1.Now().Format(time.RFC3339)
 
@@ -219,7 +219,7 @@ func (r *ChatSessionReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			)
 			if err != nil {
 				log.Error(err, "Failed to create execution plan")
-				chatSession.Status.State = "Failed"
+				chatSession.Status.State = stateFailed
 				chatSession.Status.Reason = fmt.Sprintf("Plan validation failed: %v", err)
 				chatSession.Status.LastUpdated = metav1.Now().Format(time.RFC3339)
 
@@ -332,14 +332,14 @@ func (r *ChatSessionReconciler) createSmoothAction(
 	// Determine mode based on risk assessment
 	canAutoApply := r.Planner.ShouldAutoApply(executionPlan, chatSession.Spec.PreferAuto)
 	if canAutoApply {
-		smoothAction.Spec.Mode = "auto"
+		smoothAction.Spec.Mode = modeAuto
 	} else if chatSession.Spec.PreferAuto {
 		// User wanted auto but risk is too high
 		log.Info("Auto mode requested but blocked by risk assessment",
 			"risk", executionPlan.RiskAssessment.OverallRisk,
 			"confidence", executionPlan.RiskAssessment.LLMConfidence,
 		)
-		smoothAction.Spec.Mode = "suggest"
+		smoothAction.Spec.Mode = modeSuggest
 	}
 
 	// Convert LLM response to SmoothAction format
@@ -363,7 +363,7 @@ func (r *ChatSessionReconciler) createSmoothAction(
 	}
 
 	// Set approval requirement for suggest mode
-	if smoothAction.Spec.Mode == "suggest" {
+	if smoothAction.Spec.Mode == modeSuggest {
 		smoothAction.Spec.Approval = smoothv1.ApprovalInfo{
 			Required:   true,
 			ApprovedBy: "",

@@ -59,8 +59,10 @@ func makeDeploymentUnstructured(namespace, name string, replicas int32) *unstruc
 	return obj
 }
 
-// makeConfigMapUnstructured returns an Unstructured ConfigMap.
-func makeConfigMapUnstructured(namespace, name string) *unstructured.Unstructured {
+// makeConfigMapUnstructured returns an Unstructured ConfigMap. The namespace
+// argument is preserved (even though tests currently only pass "default") so
+// that future callers can place ConfigMaps in non-default namespaces.
+func makeConfigMapUnstructured(namespace, name string) *unstructured.Unstructured { //nolint:unparam // namespace is parameterized for future use
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("ConfigMap"))
 	obj.SetNamespace(namespace)
@@ -311,12 +313,10 @@ func TestRollback_OnApplyFailure(t *testing.T) {
 	if result.Success {
 		t.Error("expected Success=false when apply fails")
 	}
-	if result.RolledBack {
-		// The rollback is attempted; whether it succeeds depends on the backup.
-		// No applied resources means the rollback count will be 0 but the flag
-		// is only set when rollback is *attempted*, which requires applied items.
-		// Here apply failed before any resource was applied, so no rollback needed.
-	}
+	// Rollback may or may not be attempted depending on which manifests were
+	// applied before the failure; we don't pin a specific value here because
+	// the executor's rollback path is exercised in TestRollback_OnRolloutTimeout.
+	_ = result.RolledBack
 	if len(result.Errors) == 0 {
 		t.Error("expected at least one error message")
 	}

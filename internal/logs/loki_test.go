@@ -53,7 +53,7 @@ func lokiQueryResponse(pairs [][2]string) string {
 		} `json:"data"`
 	}
 
-	var values [][]string
+	values := make([][]string, 0, len(pairs))
 	for _, p := range pairs {
 		values = append(values, []string{p[0], p[1]})
 	}
@@ -100,7 +100,7 @@ func TestQueryLogs_Success(t *testing.T) {
 			{timestampNS(now.Add(time.Second)), line2},
 		})
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, body)
+		_, _ = fmt.Fprint(w, body)
 	}))
 	defer ts.Close()
 
@@ -128,7 +128,7 @@ func TestQueryLogs_EmptyResult(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body := lokiQueryResponse(nil)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, body)
+		_, _ = fmt.Fprint(w, body)
 	}))
 	defer ts.Close()
 
@@ -172,7 +172,7 @@ func TestQueryLogs_BearerToken(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, lokiQueryResponse(nil))
+		_, _ = fmt.Fprint(w, lokiQueryResponse(nil))
 	}))
 	defer ts.Close()
 
@@ -194,7 +194,7 @@ func TestHealthCheck_OK(t *testing.T) {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "ready")
+		_, _ = fmt.Fprint(w, "ready")
 	}))
 	defer ts.Close()
 

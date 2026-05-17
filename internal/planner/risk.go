@@ -24,6 +24,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// Risk level identifiers shared across planner risk-assessment logic.
+const (
+	riskLow          = "low"
+	riskMed          = "med"
+	riskHigh         = "high"
+	severityBlocking = "blocking"
+)
+
 // RiskAssessor evaluates risk of applying changes
 type RiskAssessor struct {
 	confidenceThreshold float64
@@ -66,30 +74,31 @@ func (r *RiskAssessor) AssessRisk(
 	targetNamespace string,
 	autoModeRequested bool,
 ) *RiskAssessment {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	assessment := &RiskAssessment{
-		OverallRisk:   "low",
+		OverallRisk:   riskLow,
 		LLMConfidence: llmConfidence,
 		RiskFactors:   []RiskFactor{},
 	}
 
 	// Factor 1: LLM-reported risk
-	if llmRisk == "high" {
+	switch llmRisk {
+	case riskHigh:
 		assessment.RiskFactors = append(assessment.RiskFactors, RiskFactor{
 			Factor:   "llm-high-risk",
-			Severity: "high",
+			Severity: riskHigh,
 			Reason:   "LLM classified these changes as high risk",
 		})
-		assessment.OverallRisk = "high"
-	} else if llmRisk == "med" {
+		assessment.OverallRisk = riskHigh
+	case riskMed:
 		assessment.RiskFactors = append(assessment.RiskFactors, RiskFactor{
 			Factor:   "llm-medium-risk",
-			Severity: "med",
+			Severity: riskMed,
 			Reason:   "LLM classified these changes as medium risk",
 		})
-		if assessment.OverallRisk == "low" {
-			assessment.OverallRisk = "med"
+		if assessment.OverallRisk == riskLow {
+			assessment.OverallRisk = riskMed
 		}
 	}
 
@@ -97,27 +106,27 @@ func (r *RiskAssessor) AssessRisk(
 	if llmConfidence < r.confidenceThreshold {
 		assessment.RiskFactors = append(assessment.RiskFactors, RiskFactor{
 			Factor:   "low-confidence",
-			Severity: "high",
+			Severity: riskHigh,
 			Reason:   fmt.Sprintf("LLM confidence %.0f%% is below threshold %.0f%%", llmConfidence*100, r.confidenceThreshold*100),
 		})
-		assessment.OverallRisk = "high"
+		assessment.OverallRisk = riskHigh
 	}
 
 	// Factor 3: Policy violations
 	if !plan.PolicyResults.Passed {
 		blockingViolations := 0
 		for _, violation := range plan.PolicyResults.Violations {
-			if violation.Severity == "blocking" {
+			if violation.Severity == severityBlocking {
 				blockingViolations++
 			}
 		}
 		if blockingViolations > 0 {
 			assessment.RiskFactors = append(assessment.RiskFactors, RiskFactor{
 				Factor:   "policy-violations",
-				Severity: "high",
+				Severity: riskHigh,
 				Reason:   fmt.Sprintf("%d blocking policy violations", blockingViolations),
 			})
-			assessment.OverallRisk = "high"
+			assessment.OverallRisk = riskHigh
 		}
 	}
 
@@ -127,11 +136,11 @@ func (r *RiskAssessor) AssessRisk(
 		if strings.Contains(strings.ToLower(targetNamespace), riskNs) {
 			assessment.RiskFactors = append(assessment.RiskFactors, RiskFactor{
 				Factor:   "high-risk-namespace",
-				Severity: "med",
+				Severity: riskMed,
 				Reason:   fmt.Sprintf("Namespace '%s' is considered high-risk", targetNamespace),
 			})
-			if assessment.OverallRisk == "low" {
-				assessment.OverallRisk = "med"
+			if assessment.OverallRisk == riskLow {
+				assessment.OverallRisk = riskMed
 			}
 			break
 		}
@@ -141,18 +150,18 @@ func (r *RiskAssessor) AssessRisk(
 	if len(plan.Manifests) > 5 {
 		assessment.RiskFactors = append(assessment.RiskFactors, RiskFactor{
 			Factor:   "many-changes",
-			Severity: "med",
+			Severity: riskMed,
 			Reason:   fmt.Sprintf("Large number of changes (%d manifests)", len(plan.Manifests)),
 		})
-		if assessment.OverallRisk == "low" {
-			assessment.OverallRisk = "med"
+		if assessment.OverallRisk == riskLow {
+			assessment.OverallRisk = riskMed
 		}
 	}
 
 	// Determine recommendation
 	assessment.Recommendation = r.determineRecommendation(assessment, autoModeRequested)
 
-	log.Info("Risk assessment complete",
+	logger.Info("Risk assessment complete",
 		"overallRisk", assessment.OverallRisk,
 		"llmConfidence", llmConfidence,
 		"riskFactors", len(assessment.RiskFactors),
@@ -165,7 +174,7 @@ func (r *RiskAssessor) AssessRisk(
 // determineRecommendation decides what action to recommend
 func (r *RiskAssessor) determineRecommendation(assessment *RiskAssessment, autoModeRequested bool) string {
 	// High risk = always require review
-	if assessment.OverallRisk == "high" {
+	if assessment.OverallRisk == riskHigh {
 		return "review-carefully"
 	}
 
@@ -182,7 +191,7 @@ func (r *RiskAssessor) determineRecommendation(assessment *RiskAssessment, autoM
 	}
 
 	// Medium risk = review if auto requested, otherwise approve
-	if assessment.OverallRisk == "med" {
+	if assessment.OverallRisk == riskMed {
 		if autoModeRequested {
 			return "review-carefully"
 		}
@@ -203,10 +212,10 @@ func (r *RiskAssessor) ShouldAutoApply(assessment *RiskAssessment, autoModeReque
 		return false
 	}
 
-	if assessment.OverallRisk == "high" {
+	if assessment.OverallRisk == riskHigh {
 		return false
 	}
 
 	// Only auto-apply low-risk changes with high confidence
-	return assessment.OverallRisk == "low" && assessment.LLMConfidence >= r.confidenceThreshold
+	return assessment.OverallRisk == riskLow && assessment.LLMConfidence >= r.confidenceThreshold
 }

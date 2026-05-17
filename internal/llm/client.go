@@ -152,14 +152,14 @@ func (c *Client) GeneratePlan(
 		return nil, fmt.Errorf("LLM client is not enabled")
 	}
 
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	// Rate limiting
 	if err := c.rateLimiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("rate limit: %w", err)
 	}
 
-	log.Info("Generating LLM plan",
+	logger.Info("Generating LLM plan",
 		"model", c.model,
 		"namespace", aggregated.ClusterContext.TargetNamespace,
 		"deployments", len(aggregated.ClusterContext.Deployments),
@@ -169,7 +169,7 @@ func (c *Client) GeneratePlan(
 	systemPrompt := c.promptBuilder.BuildSystemPrompt()
 	userPromptText := c.promptBuilder.BuildPrompt(userPrompt, aggregated)
 
-	log.V(1).Info("LLM prompt built", "systemPromptLength", len(systemPrompt), "userPromptLength", len(userPromptText))
+	logger.V(1).Info("LLM prompt built", "systemPromptLength", len(systemPrompt), "userPromptLength", len(userPromptText))
 
 	req := openai.ChatCompletionRequest{
 		Model: c.model,
@@ -196,7 +196,7 @@ func (c *Client) GeneratePlan(
 	var err error
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
 		if attempt > 0 {
-			log.V(1).Info("Retrying LLM request", "attempt", attempt, "maxRetries", c.maxRetries)
+			logger.V(1).Info("Retrying LLM request", "attempt", attempt, "maxRetries", c.maxRetries)
 			select {
 			case <-time.After(c.retryDelay):
 			case <-ctx.Done():
@@ -214,7 +214,7 @@ func (c *Client) GeneratePlan(
 	duration := time.Since(startTime)
 
 	if err != nil {
-		log.Error(err, "LLM API call failed")
+		logger.Error(err, "LLM API call failed")
 		return nil, fmt.Errorf("OpenAI API error: %w", err)
 	}
 
@@ -224,7 +224,7 @@ func (c *Client) GeneratePlan(
 
 	responseText := resp.Choices[0].Message.Content
 
-	log.Info("LLM response received",
+	logger.Info("LLM response received",
 		"duration", duration.String(),
 		"tokensUsed", resp.Usage.TotalTokens,
 		"responseLength", len(responseText),
@@ -233,11 +233,11 @@ func (c *Client) GeneratePlan(
 	// Parse JSON response
 	var llmResp LLMResponse
 	if err := json.Unmarshal([]byte(responseText), &llmResp); err != nil {
-		log.Error(err, "Failed to parse LLM JSON response", "response", responseText)
+		logger.Error(err, "Failed to parse LLM JSON response", "response", responseText)
 		return nil, fmt.Errorf("failed to parse LLM response: %w", err)
 	}
 
-	log.Info("LLM plan generated successfully",
+	logger.Info("LLM plan generated successfully",
 		"inferredNeeds", len(llmResp.InferredNeeds),
 		"patches", len(llmResp.Patches),
 		"confidence", llmResp.Confidence,

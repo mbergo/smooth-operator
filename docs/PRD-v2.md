@@ -1,15 +1,32 @@
 # Smooth Operator — PRD v2
 
-**One-liner:** A local-first deployment companion. User points it at a GitHub repo; the operator investigates, drafts a deployment plan, hands the conversation to Claude Opus 4.7 inside a native TUI dashboard until consensus, then commits the resulting artifacts (Helm chart, Terraform, ArgoCD `Application`) to a folder it owns in the repo, publishes the chart to the repo's package registry, registers the deployment with ArgoCD, and watches the rollout — routing any failure back through Opus until the deployment stabilizes. After first deploy, the operator bows out; ArgoCD takes over the steady-state reconciliation.
+**One-liner:** A local-first deployment companion. User points it at a GitHub repo; the operator investigates, drafts a deployment plan, hands the conversation to Claude Opus 4.7 inside a native TUI dashboard until consensus, then commits the resulting plain Kubernetes manifests plus an ArgoCD `Application` CRD to a folder it owns in the repo, registers the deployment with ArgoCD via its HTTPS API, and watches the rollout — routing any failure back through Opus until the deployment stabilizes. After first deploy, the operator bows out; ArgoCD takes over the steady-state reconciliation.
 
 ---
 
 ## 0. Document Control
 
 - **Owner:** Platform
-- **Version:** v2.0 (draft)
+- **Version:** v2.1 (amended)
 - **Status:** For review
 - **Supersedes:** `PRJ.md` (v1 — in-cluster operator with embedded AI)
+
+### 0.1 Amendment Log
+
+**v2.1 (this revision).** Incorporates the architect-reviewer pass (`docs/PRD-v2-review.md`) and the ArgoCD-directly-consumes-plain-manifests realization. Major changes:
+
+1. **Drop Helm from the critical deploy path.** ArgoCD's `Application` CRD consumes plain YAML directories natively. Operator emits final-form manifests into `.smoothop/manifests/` + a single `Application` CRD pointing at that directory. No chart packaging, no OCI registry, no version-bump dance. Helm chart generation moves to optional Phase 5+ enhancement for users who want to redistribute their deployment. Kills review BLOCKERs 3.2 and HIGH 2.4.
+2. **Two-state journal protocol.** Collapse `intent / start / success | fail` to `pending / done`. Replay scans for `pending` without matching `done`. Closes review BLOCKER 1.3.
+3. **Idempotency keys are mandatory.** Every journal `op` carries an externally-supplied idempotency key: bundle SHA for git, `Idempotency-Key` header for Anthropic. `opus-call` drops from the "safe to re-execute" set without this key. Closes review HIGH 3.3.
+4. **Content-addressed git commits.** Operator commits to a `smoothop/bundle-<sha>` branch named by content hash. Replay checks `git ls-remote` for the SHA; skips if present. Closes review BLOCKER 3.1.
+5. **ArgoCD auto-sync deferred to handoff.** `syncPolicy.automated` is disabled during the fix loop; operator triggers syncs manually. Auto-sync enables at the `handed_off` terminal state. Closes review BLOCKER 7.1.
+6. **Terminal journal state.** Add `handed_off` state; resume logic short-circuits on it. Closes review HIGH 7.2.
+7. **ArgoCD HTTPS primary, MCP optional.** Inverted dependency. Phase 3 ships against raw HTTPS regardless of MCP availability. Closes review BLOCKER 2.1.
+8. **`.smoothop/` is operator-owned during session.** Operator warns + advisory-locks the directory while running. User edits inside `.smoothop/` are surfaced to the chat, not silently overwritten.
+9. **Security tightening.** Drop the "zeroed from memory" claim (unachievable in Go with `string` SDK args). Add Redis `requirepass`. Token delivered to UI via pipe, not stdout. Strict CSP + devtools off + no `file://` for Electrobun. Closes review HIGH 5.1 / 5.2 / 5.3 + MEDIUM 5.4.
+10. **Prompt-cache invariants.** Section 8 adds a cache-key invariant subsection: byte-identical system prefix, fixed cache-control breakpoint, deterministic `text/template` rendering, behaviour when `compact-2026-01-12` fires. Closes review HIGH 4.1.
+
+The two-stage Reasoner → Generator chain from the original PRD survives; only the bundle shape and the deploy path shift.
 
 ---
 
@@ -213,28 +230,41 @@ Static prompts (Section 7) tell Opus which channel it is on and what signals to 
 ```
 On startup, operator checks journal head:
 - If journal is empty -> fresh start, prompt for repo URL
-- If journal has open intent without ack -> resume that intent:
+- If terminal entry is "handed_off" -> refuse to resume; print the
+  Application URL and exit. The project is owned by ArgoCD now.
+- If journal has pending entries without matching done -> resume:
    1. Re-read all journal entries for the project
    2. Reconstruct in-memory state (current ResourceBundle, last Opus
       message ID, ArgoCD app state)
-   3. Re-establish Anthropic conversation context by replaying
-      messages from journal up to last cached message ID
-   4. Continue from the failed step (idempotent retry of Role 2 ops)
+   3. Hot path A or cold path B from §11.3 (depending on whether the
+      same operator process or a fresh one is resuming)
+   4. Continue from the failed step (idempotent retry of Role 2 ops
+      keyed by the journal entry's idempotency key)
 - User is never re-prompted for input that was already captured
 ```
 
 ### 4.4 Handoff to ArgoCD (operator exits)
 
+Handoff is the **terminal state** of the project journal. Once written, the operator refuses to resume the project on subsequent launches (see §4.3).
+
 ```
-On FirstDeployComplete:
-- Operator writes a final journal entry: "Handoff"
-- Operator commits a README.md to .smoothop/ explaining the
-  ArgoCD Application and how to evolve it
-- Operator process exits
-- ArgoCD continues to reconcile the Application via normal GitOps
-  (auto-sync on Git push, image updater if configured)
-- Future image deploys = developer pushes new image tag -> CI/CD
-  updates values.yaml in repo -> ArgoCD auto-syncs
+On FirstDeployComplete (Application Synced + Healthy AND no pending
+journal entries):
+
+1. Operator triggers one final argo sync to confirm steady state.
+2. Operator patches the Application to enable syncPolicy.automated:
+   {prune: true, selfHeal: true}.
+3. Operator merges smoothop/bundle-<sha> into the user's default
+   branch via fast-forward (no force-push, no rewrite).
+4. Operator commits a final README.md to .smoothop/ explaining
+   the ArgoCD Application, how to evolve it, and how to remove the
+   .smoothop/ folder cleanly if desired.
+5. Operator writes one final journal entry: phase=done, op=handed_off,
+   payload={appURL, defaultBranchTipSha}.
+6. Operator process exits.
+7. ArgoCD continues to reconcile the Application via normal GitOps.
+   Future image deploys = developer pushes new image tag -> CI/CD
+   updates the manifest in .smoothop/manifests/ -> ArgoCD auto-syncs.
 ```
 
 ---
@@ -274,25 +304,46 @@ The repo investigation follows in the user message.
 
 ### 5.2 Prompt: `MATERIALIZE`
 
-Sent after consensus. Asks Opus to produce the final, ready-to-commit ResourceBundle:
+Sent after consensus. Asks Opus to produce the final, ready-to-commit ResourceBundle.
+
+The bundle is a flat list of files the operator commits to `.smoothop/`. The ArgoCD `Application` CRD points its `source.path` at `.smoothop/manifests/`, telling ArgoCD to render every YAML file in that directory as plain manifests (no Helm, no Kustomize). One bundle = one git commit = one deploy state.
 
 ```
 The user has accepted the ProposalBundle below. Produce the final
 ResourceBundle. Schema:
 {
-  "commitFiles": [ {"path": "...", "content": "..."}, ... ],
-  "helmChart": { "files": [...], "version": "0.1.0" },
-  "terraform": [ {"path": "...", "content": "..."} ] | null,
-  "argoApplication": { ... },
+  "commitFiles": [
+    {"path": ".smoothop/manifests/<name>.yaml", "content": "..."},
+    {"path": ".smoothop/argocd/application.yaml", "content": "..."},
+    {"path": ".smoothop/terraform/<name>.tf", "content": "..."}  // optional
+  ],
   "notes": "string"
 }
 
-Every commitFile path MUST start with `.smoothop/`. The Helm chart MUST
-lint clean. The ArgoCD Application MUST reference the chart by its
-GitHub Packages OCI URL: oci://ghcr.io/<owner>/<repo>/charts/<name>
+Rules:
+- Every commitFile path MUST start with `.smoothop/`.
+- Plain Kubernetes manifests go under `.smoothop/manifests/` — one
+  resource per file, named `<kind>-<name>.yaml`.
+- Exactly one ArgoCD Application CRD goes at
+  `.smoothop/argocd/application.yaml`. Its spec.source MUST be:
+    source:
+      repoURL: <user's repo URL>
+      targetRevision: smoothop/bundle-<bundleSha>
+      path: .smoothop/manifests
+      directory:
+        recurse: true
+- spec.syncPolicy MUST NOT include automated.* on the initial bundle.
+  Auto-sync is enabled by the operator only at handoff.
+- Optional Terraform under `.smoothop/terraform/`. No interpolation
+  syntax in Terraform files that depends on operator runtime state.
+- All Secrets are referenced by name (created out-of-band).
+- Bundle MUST be self-contained: every selector, label, and Service
+  port referenced by one file is defined in another file in the bundle.
 
-Output ONLY the JSON.
+Output ONLY the JSON object.
 ```
+
+Helm-chart packaging is intentionally out of scope here. ArgoCD reads plain manifests directly; chart authoring is a Phase 5+ optional output for users who want to redistribute their deployment.
 
 ### 5.3 Prompt: `FIX_LOOP`
 
@@ -416,6 +467,18 @@ Everything outside `.smoothop/` is the user's domain — never written.
 - `output_config: {effort: "xhigh"}`
 - Prompt caching on static system block (one per role: initial / materialize / fix_loop / resume / gemini-mirror)
 - Same conversation thread for the whole project. Implemented by replaying message history from Redis on each call. Beta `compact-2026-01-12` for long-running chains.
+- Every Messages API call carries an `Idempotency-Key` header set to `sha256(system || conversation || user-body)` so replay after a mid-call crash reuses the same response (closes review HIGH 3.3).
+
+### 8.1.1 Cache-key invariants (closes review HIGH 4.1)
+
+Anthropic prompt caching keys on the literal byte prefix of the request. The following invariants are enforced by the operator and verified by unit tests:
+
+1. **System prefix is byte-frozen at compile time.** Each prompt template's system block is rendered once at build via `text/template` with no per-session interpolation, embedded into the binary via `embed.FS`. Whitespace (`{{-` vs `{{`) and field order in struct-derived sections are normalised at code-review time.
+2. **One cache breakpoint per prompt.** `cache_control: {"type": "ephemeral"}` is set on the LAST `TextBlockParam` of the system array, never inside the user message. Variable content (the body) lives strictly after the breakpoint.
+3. **Replay is byte-identical.** The conversation list stores ordered message SHAs; payloads under `:payload:<sha>` are written once and never re-serialised. The operator reconstructs the message slice from the same bytes that were originally sent — no Go `json.Marshal` round-trip on replay.
+4. **Same model version for the project's lifetime.** The model string is captured at project init and persisted in `project:<id>:meta:model`. Mid-project bumps require explicit user opt-in and reset the cache.
+5. **Compaction handling.** When `compact-2026-01-12` fires, the server's view of the conversation diverges from the local SHA list. The operator detects compaction via the response's `compaction` block, snapshots the new server-side state into `:payload:<compaction-sha>`, and prunes preceding SHAs from the conversation list. Subsequent calls replay from the compaction snapshot forward. A unit test asserts `cache_read_input_tokens > 0` on the third call after compaction.
+6. **`RESUME_CONTEXT` has its own cache key.** Cold resume (§11.3 path B) is a cache miss by design. Hot resume (§11.3 path A) reuses the original role's cache key.
 
 ### 8.2 Fallback: Gemini Pro 3.1
 
@@ -431,44 +494,70 @@ Triggered by setting `mode: "diff"` in the Operator → Opus envelope. Opus emit
 
 ## 9. ArgoCD Integration
 
-- Use ArgoCD MCP server (community / TBD; flagged as a dependency).
-- Operator calls:
-  - `applications.create` / `applications.update` — upserts the `Application` CR
-  - `applications.sync` — triggers sync
-  - `applications.get` / `applications.watch` — polls / streams status
-- `Application` shape Opus must emit:
-  ```yaml
-  apiVersion: argoproj.io/v1alpha1
-  kind: Application
-  metadata:
-    name: <project-slug>
-    namespace: argocd
-  spec:
-    project: default
-    source:
-      repoURL: oci://ghcr.io/<owner>/<repo>/charts/<name>
-      chart: <name>
-      targetRevision: 0.1.0
-      helm:
-        valueFiles: []
-        values: |
-          # rendered values from Opus
-    destination:
-      server: https://kubernetes.default.svc
-      namespace: <target-ns>
-    syncPolicy:
-      automated:
-        prune: true
-        selfHeal: true
-      syncOptions:
-        - CreateNamespace=true
-  ```
+### 9.1 Transport
 
-- After first stable sync, `syncPolicy.automated` ensures subsequent commits to `.smoothop/` auto-deploy without the operator.
+**Primary: raw HTTPS against the ArgoCD API server**, using a per-project API token captured at init and stored in the OS keychain. Operator calls land at `https://<argocd-host>/api/v1/applications/...`.
 
-### 9.1 If ArgoCD MCP does not exist
+**Optional MCP path.** If a vetted ArgoCD MCP server is available at runtime, the operator switches to it for the same call set. Decided by the `argocd.transport = "https" | "mcp"` config knob. MCP is an optimisation, not a dependency. Phase 3 ships raw-HTTPS regardless of MCP availability.
 
-Fallback: operator shells out to `argocd` CLI binary if installed, or calls the ArgoCD HTTP API directly with a per-project API token captured at init. Documented as a degraded mode.
+### 9.2 Calls
+
+- `PUT /api/v1/applications/{name}` — upsert the `Application` CR.
+- `POST /api/v1/applications/{name}/sync` — trigger sync (manual during fix loop; one-shot at handoff just before enabling auto-sync).
+- `GET /api/v1/applications/{name}` — poll status.
+- `GET /api/v1/stream/applications?name={name}` — SSE watch on status transitions.
+
+### 9.3 Application shape Opus emits
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: <project-slug>
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: <user's repo URL>            # NOT an OCI registry
+    targetRevision: smoothop/bundle-<sha> # content-addressed branch
+    path: .smoothop/manifests             # plain YAML directory
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: <target-ns>
+  syncPolicy:
+    # automated.* INTENTIONALLY ABSENT during fix loop.
+    # Operator enables auto-sync at handoff, see §4.4.
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+  revisionHistoryLimit: 10
+  ignoreDifferences: []                   # populated by Opus if HPAs etc.
+```
+
+### 9.4 Auto-sync lifecycle (closes review BLOCKER 7.1)
+
+Auto-sync is **off** during the fix loop. The operator triggers each sync manually after committing a new bundle. Rationale: with auto-sync on, ArgoCD would race the operator and apply intermediate fix-loop bundles before they're verified.
+
+At the `handed_off` terminal state (§4.4), the operator issues one final `PATCH /api/v1/applications/{name}` to add:
+
+```yaml
+syncPolicy:
+  automated:
+    prune: true
+    selfHeal: true
+```
+
+After that patch, ArgoCD owns reconciliation. Operator exits.
 
 ---
 
@@ -476,19 +565,21 @@ Fallback: operator shells out to `argocd` CLI binary if installed, or calls the 
 
 ### 10.1 Auth
 
-- User provides a fine-scoped PAT or GitHub App installation token at `smoothctl init`. Stored in OS keychain via the OS-native API Electrobun exposes; never written to disk plaintext.
-- Required scopes: `repo`, `write:packages`, `read:packages`.
+- User provides a fine-scoped PAT or GitHub App installation token at `smoothctl init`. Stored in OS keychain via the operator's keychain library (`go-keyring`); never written to disk plaintext. Electrobun never sees the token.
+- Required scopes: `repo` (read + write to `.smoothop/`, branch creation). `write:packages` only required if optional Helm publishing in §10.3 is enabled.
 
-### 10.2 Commits
+### 10.2 Commits (closes review BLOCKER 3.1)
 
-- All commits authored by `smooth-operator[bot]` with a co-author trailer naming the user (their git config user.email / name).
-- One commit per ResourceBundle apply. Commit message follows conventional commit format and references the Opus message ID + journal entry ID.
+- All commits authored by `smooth-operator[bot]` with a co-author trailer naming the user (their git config user.email / name). Commit message format is conventional-commit and references the Opus message ID + journal entry ID. **Commit messages must not contain the substring "generated by", "co-authored-by claude", or any other AI attribution** (see user-level rule on signed commits).
+- **Content-addressed branches.** Each bundle commits to `smoothop/bundle-<bundleSha>`, where `bundleSha = sha256(canonical-json(commitFiles))`. Replays check `git ls-remote origin smoothop/bundle-<bundleSha>` first; if the branch exists at the expected tip, skip the push.
+- `main` (or the user's default branch) is never written by the operator during fix loop. The final `handed_off` step merges the converged `smoothop/bundle-<sha>` into the default branch via fast-forward.
+- Commits are signed using the user's local SSH/GPG signing config.
 
-### 10.3 Helm package publishing
+### 10.3 Optional: Helm chart publishing (Phase 5+)
 
-- Each ResourceBundle apply bumps chart version (semver: 0.x.y; bump y on fix-loop, bump x on user-driven edit).
-- Publish via `helm push` to `oci://ghcr.io/<owner>/<repo>/charts/<name>`.
-- Visibility inherits from the parent repo (private repo → private package).
+Plain manifests under `.smoothop/manifests/` are the v2 deploy artifact. ArgoCD consumes them directly via `source.directory`. There is **no Helm packaging on the critical path**.
+
+A Phase 5+ enhancement may translate the bundle into a Helm chart and publish via `helm push oci://ghcr.io/<owner>/<repo>/charts/<name>` for users who want to redistribute their deployment. When enabled, the chart version is derived from the bundle SHA (`0.0.0-<short-sha>`), not a manually bumped semver — that keeps `helm push` idempotent under journal replay.
 
 ---
 
@@ -501,30 +592,74 @@ Fallback: operator shells out to `argocd` CLI binary if installed, or calls the 
 - Single-tenant: one operator process = one Redis = one project at a time.
 - Future: Redis Cluster for multi-project parallel use; out of scope for v2.
 
-### 11.2 Journaling protocol
+### 11.2 Journaling protocol (closes review BLOCKER 1.3 + HIGH 3.3)
 
-1. Before any side-effecting operation, write `phase=intent`.
-2. Begin the operation; write `phase=start`.
-3. On completion, write `phase=success` with the result reference.
-4. On error, write `phase=fail` with error detail.
-5. On startup, scan the journal: any `start` without a matching `success|fail` is replayed (idempotently, because each op is keyed by `{op, ref}` and is safe to re-execute).
+**Two states only: `pending` and `done`.**
 
-### 11.3 Conversation resumption
+1. Before any side-effecting operation, write `phase=pending` with the typed payload AND a stable **idempotency key**. Required keys per op:
+   - `git-commit`: `bundleSha = sha256(canonical-json(commitFiles))`
+   - `git-push`: `bundleSha` (same as above)
+   - `opus-call`: `requestSha = sha256(system || conversation || user-body)` — passed as Anthropic's `Idempotency-Key` header so a replay reuses the same response, no extra spend
+   - `argo-upsert`: `appName || bundleSha`
+   - `argo-sync`: `appName || bundleSha`
+2. Execute the operation.
+3. On success, write `phase=done` with the result reference and the same idempotency key.
+4. On error, write `phase=done` with `error` populated.
 
-- Every Opus call's request + response is hashed and stored under `:payload:<sha>` in Redis.
-- The conversation list holds ordered message SHAs.
-- On resume, the operator replays the conversation list to Opus via the `RESUME_CONTEXT` prompt rather than the full thread, saving tokens.
+**Replay on startup**: scan the journal for `pending` entries with no matching `done`. For each:
+
+- Look up the idempotency key in Redis (`:idem:<op>:<key>` → `done` payload if present).
+- If `done` payload is present, the op succeeded but the journal didn't flush. Promote the `pending` entry to `done` using the cached result.
+- Otherwise, re-execute the op. Because every op accepts the idempotency key (Anthropic header, git `ls-remote` precheck, ArgoCD PUT shape), re-execution is safe.
+
+There is no `intent` phase. The single `pending` entry is written **before** the side effect and **after** the idempotency key is computed. A crash before `pending` lands means the side effect did not run — nothing to replay. A crash after `pending` but before `done` triggers replay, which is safe.
+
+**Lock TTL: lease, not 60 s fixed.** The project lock uses a heartbeat — the operator renews the lease every 10 s while a side-effecting op is in flight. Lock auto-expires only on operator death, not on long-running network calls (closes review MEDIUM 1.4).
+
+### 11.3 Conversation resumption (closes review MEDIUM 3.4 + HIGH 4.1)
+
+**Two distinct paths**, resolved here to remove the §4.3 / §5.4 contradiction in the original draft:
+
+**A. Hot resume — same process, same model session.** Conversation is replayed byte-identically from `:payload:<sha>` Redis entries. SHAs are stored in insertion order. The static system prefix is byte-frozen at startup and cache-keyed via `cache_control: {type: "ephemeral"}`. This path preserves Anthropic prompt-cache hits.
+
+**B. Cold resume — operator crashed mid-flow, restarted later.** Operator sends a **single** `RESUME_CONTEXT` prompt containing a structured journal snapshot. Opus replies with a discriminator: `WAIT_FOR_USER`, `REDO_LAST_BUNDLE`, or `REQUEST_FIX_LOOP`. The operator then re-enters the normal flow with the `INITIAL_PROPOSAL` / `MATERIALIZE` / `FIX_LOOP` system prefix — accepting a one-time cache miss because the cost of re-establishing context this way is far less than replaying the full hot conversation.
+
+The choice between A and B is made by checking whether the operator process owns the in-memory Redis connection from the original run; if yes, A; if no, B.
 
 ---
 
 ## 12. Security
 
-- Anthropic API key + GitHub PAT + ArgoCD token live only in the OS keychain. Operator binary reads them at startup and zeroes them from process memory after use.
+### 12.1 Credentials (closes review HIGH 5.3 + MEDIUM 5.4)
+
+- Anthropic API key + GitHub PAT + ArgoCD token live in the OS keychain via `go-keyring`. Operator reads them at startup and passes them to the SDK / HTTP client.
+- **Threat model is realistic, not aspirational**: credentials remain resident in process memory for the lifetime of the operator. Go strings are immutable and the Anthropic / HTTP SDKs accept `string`, so we cannot reliably zero them. Mitigation is operator lifetime, not memory hygiene — the operator exits as soon as `handed_off` is reached.
 - Operator NEVER writes credentials to disk, journal, or Git.
-- Redis bound to `127.0.0.1` only. No exposed network port.
-- WebSocket between operator and Electrobun UI uses a one-time bootstrap token printed to stdout.
-- All ResourceBundles are validated against the same Kind allowlist + namespace enforcement we already implemented in `sec/hardening` (Section 13 reuses that code).
-- Operator's git commits are signed with the user's local SSH/GPG signing config (matches existing user-level rule on signed commits).
+- Redis bound to `127.0.0.1` only AND configured with `requirepass <random-32-byte-hex>` generated at boot. The password is stored in the OS keychain alongside the API tokens. Same-user processes therefore cannot connect without keychain access.
+
+### 12.2 UI ↔ operator transport (closes review HIGH 5.1)
+
+- WebSocket between operator and Electrobun UI runs on `127.0.0.1:<ephemeral-port>` and requires a one-time bootstrap token.
+- **Token delivery is via anonymous pipe**, not stdout. Operator spawns Electrobun as a child process; the token is written to the child's stdin (or to a Unix-domain socket if pipe semantics are insufficient on the host OS).
+- Token rotation on reconnect: stored under `project:<id>:wsToken` in Redis with 5-minute idle TTL; refreshed on every successful frame. UI reconnect after crash uses the stored token if the operator is still alive; otherwise reconnect requires user re-init.
+
+### 12.3 Electrobun hardening (closes review HIGH 5.2)
+
+- Devtools disabled in release builds. Builds with devtools enabled refuse to run if `ANTHROPIC_API_KEY` is present in the environment.
+- Strict CSP: `default-src 'self'; connect-src ws://127.0.0.1:<port>; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:`.
+- UI loaded from an embedded asset bundle. `file://` URLs are not permitted; the webview is configured to deny them.
+- Webview version pinned in the release manifest. Auto-update of the webview is gated on a CI re-test of the smoke suite.
+
+### 12.4 Bundle validation (carries forward v1 work)
+
+- All ResourceBundles are validated against the same Kind allowlist + namespace enforcement implemented in `sec/hardening` (Section 13 reuses that code).
+- Every `commitFile.path` MUST start with `.smoothop/` and MUST NOT contain `..` segments or null bytes (closes review MEDIUM 5.5).
+- `metadata.namespace` on every manifest MUST equal the destination namespace declared in the `Application` CR (carries forward v1's `EnforceNamespace`).
+
+### 12.5 Commit signing
+
+- Operator's git commits are signed with the user's local SSH/GPG signing config (matches user-level rule on signed commits).
+- Commit message scanner rejects any string matching the AI-attribution token list before pushing (matches user-level rule).
 
 ---
 
@@ -563,18 +698,21 @@ Concrete code that gets retired:
 - ResourceBundle decoder + validator
 - httptest-mocked unit tests
 
-### Phase 2 — GitHub + Helm (1 week)
+### Phase 2 — GitHub publisher (3 days, down from 1 week)
 
-- `internal/gitops/` ported to local-mode (clone, branch, commit, push)
-- Helm chart packager (existing template generator already in `internal/gitops/helm.go`)
-- GitHub Packages OCI publisher (`helm push oci://...`)
+- `internal/gitops/` ported to local-mode (clone, content-addressed branch creation, commit, push)
+- Content-addressed branch name `smoothop/bundle-<sha>` with `git ls-remote` skip-if-present check
 - Idempotent retries via journal
+- No Helm packager. No OCI registry. Plain manifests under `.smoothop/manifests/` are the v2 deploy artifact.
+- (Optional Helm chart publishing moves to Phase 5+ for users who want redistribution.)
 
-### Phase 3 — ArgoCD MCP (1 week)
+### Phase 3 — ArgoCD HTTPS client (1 week)
 
-- Verify MCP server availability; if none, build raw-HTTP wrapper
-- `applications.upsert/sync/watch` flows
-- Fix-loop trigger from `OutOfSync|Degraded` observation
+- Raw HTTPS against the ArgoCD API server is the **primary** path. MCP is optional.
+- `applications.upsert/sync/watch` flows against `/api/v1/applications/...`
+- Per-project ArgoCD API token captured at init
+- Fix-loop trigger from `OutOfSync|Degraded` observation via SSE watch
+- Optional MCP-transport switch behind a runtime config knob
 
 ### Phase 4 — Electrobun UI (2 weeks)
 
@@ -601,13 +739,23 @@ Total estimated: **8 weeks** for a single engineer; less with parallel agents (s
 
 ## 15. Open Questions
 
-1. **ArgoCD MCP** — does a maintained MCP server exist for ArgoCD? If not, raw HTTP path adds Phase 3 scope. Action: spike in Phase 0.
-2. **jules.google.com MCP** — does it exist, and what's its surface? If yes, integrate as the optional first-investigator. If no, drop the dependency.
-3. **Electrobun maturity** — is the framework stable enough for OSS distribution? Alternative: Tauri, Wails (Go-native). Action: short spike in Phase 4 kickoff.
-4. **Repo layout collision** — what if the user already has a `.smoothop/` folder? Refuse, prompt to move, or use `.smoothop-<projectId>/`? Default: refuse and ask.
-5. **Multi-cluster** — single ArgoCD instance can deploy to many clusters. v2 picks the destination cluster from the user's ArgoCD setup; do we let the user pick at init time or always default to `https://kubernetes.default.svc`?
-6. **Conversation thread length** — Opus 4.7 has 1M context plus compaction. Do we ever clear the thread? Probably yes on `FirstDeployComplete`. Worth a knob: `--reset-on-handoff`.
-7. **Gemini parity** — Gemini Pro 3.1 may not produce JSON of the same fidelity. Fallback may produce degraded bundles. Acceptable in v2?
+Resolved in v2.1 (this revision):
+
+- ~~**Q1 ArgoCD MCP**~~ — **resolved.** Raw HTTPS is the primary transport (§9). MCP is an optional optimisation. Phase 3 no longer depends on MCP existing.
+- ~~**Q4 Repo layout collision**~~ — **resolved.** If `.smoothop/` already exists, operator refuses and prompts the user to remove it or move it manually. Never auto-renames.
+
+Still open (ranked by blocking potential per reviewer §8):
+
+1. **Conversation thread reset on handoff** (was Q6, now HIGH). Recommend: thread closes on handoff; new project = new thread. Confirms cache-key invariant 4 in §8.1.1.
+2. **Multi-cluster destination** (was Q5, MEDIUM). Default to user-pick at init; if ArgoCD reports exactly one registered cluster, default to that one. Falls back to `https://kubernetes.default.svc` only when ArgoCD is co-located with the target cluster.
+3. **Electrobun maturity** (was Q3, MEDIUM). Phase 0 spike T0.3 decides. Add explicit keychain-access verification to the spike's DoD: if Electrobun cannot read the OS keychain, the operator handles credentials Go-side via `go-keyring` and Electrobun is decorative.
+4. **Gemini parity** (was Q7, MEDIUM). Acceptable for v2 to ship with: Gemini-mode shows a warning badge in the UI; bundles get extra validator strictness; user can re-prompt via Anthropic when restored.
+5. **jules.google.com MCP** (was Q2, LOW). **Defer to post-v2.** Operator-side repo scan is on the critical path regardless; Jules adds risk for zero user-visible benefit in v2.
+
+New questions surfaced by the v2.1 amendment:
+
+6. **`.smoothop/` advisory lock semantics.** During an active operator session, should the operator `chmod a-w .smoothop/`, or rely on a `.smoothop/LOCK` sentinel file + Git hook warnings? Trade-off: filesystem permissions are stronger but break editor UX; sentinel files are politer but easier to ignore. Default: sentinel file + visible warning in the TUI.
+7. **`smoothop/bundle-<sha>` branch retention.** After fast-forward into the default branch at handoff, do we delete the per-bundle branches or keep them as a recovery history? Default: keep last 10 per project; configurable.
 
 ---
 

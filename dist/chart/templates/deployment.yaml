@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "smooth-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "smooth-operator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "smooth-operator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "smooth-operator.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "smooth-operator.serviceAccountName" . }}
+      terminationGracePeriodSeconds: 10
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: manager
+          image: {{ include "smooth-operator.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [/manager]
+          args:
+            {{- toYaml .Values.args | nindent 12 }}
+          ports:
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+            {{- end }}
+          env:
+            - name: LLM_PROVIDER
+              value: {{ .Values.operator.llmProvider | quote }}
+            - name: LLM_MODEL
+              value: {{ .Values.operator.llmModel | quote }}
+            - name: AUTO_MODE
+              value: {{ .Values.operator.autoMode | quote }}
+            {{- with .Values.operator.lokiURL }}
+            - name: LOKI_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.operator.prometheusURL }}
+            - name: PROMETHEUS_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.operator.llmApiKeySecret }}
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: LLM_API_KEY
+            {{- end }}
+            {{- with .Values.operator.gitTokenSecret }}
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: GITHUB_TOKEN
+                  optional: true
+            - name: GITLAB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: GITLAB_TOKEN
+                  optional: true
+            - name: LOKI_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: LOKI_TOKEN
+                  optional: true
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,131 @@
+# Default values for smooth-operator.
+
+# -- Number of controller replicas.
+replicaCount: 1
+
+image:
+  # -- Operator image repository.
+  repository: ghcr.io/mbergo/smooth-operator
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+  # -- Image tag. Defaults to .Chart.AppVersion.
+  tag: ""
+
+# -- Override the chart name.
+nameOverride: ""
+# -- Override the full release name.
+fullnameOverride: ""
+
+# -- imagePullSecrets references for private registries.
+imagePullSecrets: []
+
+serviceAccount:
+  # -- Create the ServiceAccount.
+  create: true
+  # -- Annotations for the ServiceAccount.
+  annotations: {}
+  # -- Name override; defaults to the chart fullname.
+  name: ""
+
+rbac:
+  # -- Create cluster-scoped Role/RoleBindings required by the operator.
+  create: true
+
+crds:
+  # -- Install CRDs as part of the chart. Set to false if installing CRDs separately.
+  install: true
+  # -- Retain CRDs when the chart is uninstalled.
+  keep: true
+
+# -- Pod-level annotations.
+podAnnotations:
+  kubectl.kubernetes.io/default-container: manager
+
+# -- Pod-level labels.
+podLabels: {}
+
+# -- Pod security context (Restricted PSS-compliant).
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container security context.
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# -- Resource requests / limits.
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+# -- Liveness probe configuration.
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: health
+  initialDelaySeconds: 15
+  periodSeconds: 20
+
+# -- Readiness probe configuration.
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: health
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+# -- Controller manager arguments.
+args:
+  - --leader-elect
+  - --health-probe-bind-address=:8081
+
+# -- nodeSelector for controller pods.
+nodeSelector: {}
+# -- Tolerations for controller pods.
+tolerations: []
+# -- Affinity for controller pods.
+affinity: {}
+
+leaderElection:
+  # -- Enable leader election (recommended for HA).
+  enabled: true
+
+metrics:
+  # -- Expose Prometheus metrics service.
+  enabled: true
+  # -- Metrics service port.
+  port: 8443
+  # -- Service type.
+  type: ClusterIP
+
+# -- Configuration injected into the operator (env vars).
+operator:
+  # -- LLM provider: openai | azure.
+  llmProvider: openai
+  # -- LLM model name.
+  llmModel: gpt-4-turbo-preview
+  # -- Reference to a Secret holding the LLM API token under key LLM_API_KEY.
+  llmApiKeySecret: ""
+  # -- Reference to a Secret holding Git provider tokens (GITHUB_TOKEN / GITLAB_TOKEN).
+  gitTokenSecret: ""
+  # -- Optional Loki base URL for log aggregation.
+  lokiURL: ""
+  # -- Optional Prometheus base URL for metrics aggregation.
+  prometheusURL: ""
+  # -- Auto-mode default; per-ChatSession spec.preferAuto still wins.
+  autoMode: false
+
+# -- Extra environment variables (list of EnvVar).
+extraEnv: []
+
+# -- Pod priorityClassName.
+priorityClassName: ""

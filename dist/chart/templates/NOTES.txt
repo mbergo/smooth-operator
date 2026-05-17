@@ -1,0 +1,25 @@
+Smooth Operator {{ .Chart.AppVersion }} installed in namespace {{ .Release.Namespace }}.
+
+1. Verify the controller is running:
+   kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "smooth-operator.name" . }}
+
+2. CRDs registered:
+   kubectl get crd chatsessions.smooth.smooth.k8s.io smoothactions.smooth.smooth.k8s.io
+
+3. Apply a sample ChatSession:
+   kubectl apply -f https://raw.githubusercontent.com/mbergo/smooth-operator/main/config/samples/smooth_v1_chatsession.yaml
+
+4. Watch the operator process the session:
+   kubectl get chatsessions -A -w
+
+{{- if not .Values.operator.llmApiKeySecret }}
+
+WARNING: operator.llmApiKeySecret is unset. The operator will start but LLM
+inference will be disabled until a Secret containing LLM_API_KEY is referenced.
+{{- end }}
+
+{{- if not .Values.operator.gitTokenSecret }}
+
+WARNING: operator.gitTokenSecret is unset. Pull request creation against
+GitHub or GitLab will degrade gracefully (no PR opened).
+{{- end }}

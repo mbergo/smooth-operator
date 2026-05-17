@@ -102,20 +102,20 @@ func (e *Executor) Execute(ctx context.Context, plan *planner.Plan) (*ExecutionR
 	// If no errors, watch rollouts for Deployments
 	if result.Success && len(result.AppliedResources) > 0 {
 		log.Info("Watching rollouts for applied Deployments")
-		
+
 		rolloutResults, err := e.watcher.WatchRollouts(ctx, result.AppliedResources)
 		if err != nil {
 			log.Error(err, "Rollout watching failed")
 			result.Warnings = append(result.Warnings, fmt.Sprintf("Rollout watch error: %v", err))
 		}
-		
+
 		result.RolloutStatuses = rolloutResults
 
 		// Check if any rollouts failed
 		for _, rollout := range rolloutResults {
 			if rollout.State == "failed" || rollout.State == "timedout" {
 				result.Success = false
-				result.Errors = append(result.Errors, 
+				result.Errors = append(result.Errors,
 					fmt.Sprintf("Rollout failed for %s: %s", rollout.DeploymentName, rollout.State))
 
 				// Trigger rollback
@@ -123,7 +123,7 @@ func (e *Executor) Execute(ctx context.Context, plan *planner.Plan) (*ExecutionR
 					log.Info("Triggering automatic rollback due to rollout failure")
 					rollbackResult := e.rollback(ctx, backup, result.AppliedResources)
 					result.RolledBack = true
-					result.Warnings = append(result.Warnings, 
+					result.Warnings = append(result.Warnings,
 						fmt.Sprintf("Rolled back %d resources due to rollout failure", rollbackResult.RolledBackCount))
 				}
 				break
@@ -160,7 +160,7 @@ func (e *Executor) applyManifest(ctx context.Context, manifest *planner.Validate
 	} else {
 		// Update existing resource using server-side apply
 		operation = "updated"
-		err = e.client.Patch(ctx, obj, client.Apply, 
+		err = e.client.Patch(ctx, obj, client.Apply,
 			client.ForceOwnership,
 			client.FieldOwner("smooth-operator"))
 	}
@@ -284,4 +284,3 @@ func (e *Executor) rollback(ctx context.Context, backup *BackupState, applied []
 
 	return result
 }
-

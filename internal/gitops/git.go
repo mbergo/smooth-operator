@@ -320,16 +320,26 @@ func (g *GitClient) createPullRequest(ctx context.Context, options GitOptions, b
 }
 
 // isGitLabHost reports whether the given host should be routed through the
-// GitLab MR API. It recognizes gitlab.com, *.gitlab.com, and any host whose
-// label contains "gitlab" (covering self-hosted instances such as
-// gitlab.acme.internal or gitlab-ee.example.com).
+// GitLab MR API. It recognizes gitlab.com, *.gitlab.com, and self-hosted
+// instances whose first DNS label is exactly "gitlab" (e.g.
+// gitlab.acme.internal). It deliberately does NOT match arbitrary substrings
+// such as "gitlab-competitor.com" or "mygitlab.com". Self-hosted instances
+// that don't follow the gitlab.<domain> convention should be configured
+// explicitly by the caller (future Provider option).
 func isGitLabHost(host string) bool {
 	h := strings.ToLower(host)
+	// Strip a trailing port if present (e.g. "gitlab.example.com:8443").
+	if i := strings.Index(h, ":"); i >= 0 {
+		h = h[:i]
+	}
 	if h == "gitlab.com" || strings.HasSuffix(h, ".gitlab.com") {
 		return true
 	}
-	// Match self-hosted GitLab whose hostname embeds "gitlab" (common convention).
-	return strings.Contains(h, "gitlab")
+	firstLabel := h
+	if i := strings.Index(h, "."); i >= 0 {
+		firstLabel = h[:i]
+	}
+	return firstLabel == "gitlab"
 }
 
 // createGitHubPR posts to the GitHub REST API and returns the PR URL and number.

@@ -172,8 +172,8 @@ func TestCreatePlan_HappyPath_NewResources(t *testing.T) {
 		Patches: []llm.PatchSuggestion{
 			{Kind: "ConfigMap", YAML: configMapYAML("app-config", "staging")},
 		},
-		Confidence: 0.9,
-		Risk:       "low",
+		Confidence:  0.9,
+		Risk:        "low",
 		Explanation: "adding a configmap",
 	}
 
@@ -219,9 +219,9 @@ func TestCreatePlan_InvalidPatch(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name        string
-		patches     []llm.PatchSuggestion
-		wantErrors  bool
+		name          string
+		patches       []llm.PatchSuggestion
+		wantErrors    bool
 		wantManifests int
 	}{
 		{

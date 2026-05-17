@@ -35,62 +35,62 @@ func TestGenerateUnifiedDiff(t *testing.T) {
 	d := newTestDiffGenerator()
 
 	tests := []struct {
-		name        string
-		before      string
-		after       string
-		kind        string
+		name         string
+		before       string
+		after        string
+		kind         string
 		resourceName string
-		wantInDiff  []string
-		wantAbsent  []string
+		wantInDiff   []string
+		wantAbsent   []string
 	}{
 		{
-			name:        "added field shows plus line",
-			before:      "replicas: 1\n",
-			after:       "replicas: 1\nnewField: value\n",
-			kind:        "Deployment",
+			name:         "added field shows plus line",
+			before:       "replicas: 1\n",
+			after:        "replicas: 1\nnewField: value\n",
+			kind:         "Deployment",
 			resourceName: "myapp",
-			wantInDiff:  []string{"+newField: value"},
+			wantInDiff:   []string{"+newField: value"},
 		},
 		{
-			name:        "removed field shows minus line",
-			before:      "replicas: 1\noldField: value\n",
-			after:       "replicas: 1\n",
-			kind:        "Deployment",
+			name:         "removed field shows minus line",
+			before:       "replicas: 1\noldField: value\n",
+			after:        "replicas: 1\n",
+			kind:         "Deployment",
 			resourceName: "myapp",
-			wantInDiff:  []string{"-oldField: value"},
+			wantInDiff:   []string{"-oldField: value"},
 		},
 		{
-			name:        "modified field shows both minus and plus",
-			before:      "replicas: 1\n",
-			after:       "replicas: 3\n",
-			kind:        "Deployment",
+			name:         "modified field shows both minus and plus",
+			before:       "replicas: 1\n",
+			after:        "replicas: 3\n",
+			kind:         "Deployment",
 			resourceName: "myapp",
-			wantInDiff:  []string{"-replicas: 1", "+replicas: 3"},
+			wantInDiff:   []string{"-replicas: 1", "+replicas: 3"},
 		},
 		{
-			name:        "identical content produces empty diff",
-			before:      "replicas: 2\n",
-			after:       "replicas: 2\n",
-			kind:        "Deployment",
+			name:         "identical content produces empty diff",
+			before:       "replicas: 2\n",
+			after:        "replicas: 2\n",
+			kind:         "Deployment",
 			resourceName: "myapp",
-			wantInDiff:  nil, // empty string is fine
-			wantAbsent:  []string{"-replicas", "+replicas"},
+			wantInDiff:   nil, // empty string is fine
+			wantAbsent:   []string{"-replicas", "+replicas"},
 		},
 		{
-			name:        "diff header contains kind and name",
-			before:      "",
-			after:       "kind: Service\n",
-			kind:        "Service",
+			name:         "diff header contains kind and name",
+			before:       "",
+			after:        "kind: Service\n",
+			kind:         "Service",
 			resourceName: "svc-frontend",
-			wantInDiff:  []string{"Service", "svc-frontend"},
+			wantInDiff:   []string{"Service", "svc-frontend"},
 		},
 		{
-			name:        "create from empty before shows full content as additions",
-			before:      "",
-			after:       "apiVersion: apps/v1\nkind: Deployment\n",
-			kind:        "Deployment",
+			name:         "create from empty before shows full content as additions",
+			before:       "",
+			after:        "apiVersion: apps/v1\nkind: Deployment\n",
+			kind:         "Deployment",
 			resourceName: "new-deploy",
-			wantInDiff:  []string{"+apiVersion: apps/v1", "+kind: Deployment"},
+			wantInDiff:   []string{"+apiVersion: apps/v1", "+kind: Deployment"},
 		},
 	}
 
@@ -178,7 +178,7 @@ func TestDetectChangedFields(t *testing.T) {
 			wantFields: []string{"metadata.env"},
 		},
 		{
-			name: "spec absent in before, present in after",
+			name:   "spec absent in before, present in after",
 			before: map[string]interface{}{},
 			after: map[string]interface{}{
 				"spec": map[string]interface{}{"replicas": 1},
@@ -236,9 +236,9 @@ func TestFormatDiffForDisplay(t *testing.T) {
 	d := newTestDiffGenerator()
 
 	tests := []struct {
-		name    string
-		diff    *ManifestDiff
-		wantIn  []string
+		name   string
+		diff   *ManifestDiff
+		wantIn []string
 	}{
 		{
 			name: "create diff contains kind and name",

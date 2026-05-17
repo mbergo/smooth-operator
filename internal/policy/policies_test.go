@@ -18,6 +18,7 @@ package policy
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -442,5 +443,493 @@ func TestAutoModeAllowed(t *testing.T) {
 					tc.risk, tc.confidence, tc.minConfidence, got, tc.wantAllowed)
 			}
 		})
+	}
+}
+
+// --------------------------------------------------------------------------
+// KindAllowlistPolicy
+// --------------------------------------------------------------------------
+
+// makeObjOfKind returns a minimal unstructured object whose Kind field is set.
+func makeObjOfKind(kind string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       kind,
+			"metadata": map[string]interface{}{
+				"name":      "test-" + kind,
+				"namespace": "default",
+			},
+		},
+	}
+}
+
+func TestKindAllowlistPolicy_AllowedKinds(t *testing.T) {
+	ctx := context.Background()
+	p := &KindAllowlistPolicy{}
+
+	allowed := []string{
+		"Deployment",
+		"Service",
+		"HorizontalPodAutoscaler",
+		"Ingress",
+		"ConfigMap",
+		"NetworkPolicy",
+		"PersistentVolumeClaim",
+		"ServiceAccount",
+		"Role",
+		"RoleBinding",
+	}
+
+	for _, kind := range allowed {
+		kind := kind // capture
+		t.Run(kind+"_is_allowed", func(t *testing.T) {
+			t.Parallel()
+			result := p.Evaluate(ctx, makeObjOfKind(kind))
+			if !result.Passed {
+				t.Errorf("kind %q should be allowed but was denied: %s", kind, result.Message)
+			}
+		})
+	}
+}
+
+func TestKindAllowlistPolicy_ExplicitlyDeniedKinds(t *testing.T) {
+	ctx := context.Background()
+	p := &KindAllowlistPolicy{}
+
+	tests := []struct {
+		kind            string
+		wantMsgContains string
+	}{
+		{
+			kind:            "ClusterRole",
+			wantMsgContains: "explicitly denied",
+		},
+		{
+			kind:            "ClusterRoleBinding",
+			wantMsgContains: "explicitly denied",
+		},
+		{
+			kind:            "Namespace",
+			wantMsgContains: "explicitly denied",
+		},
+		{
+			kind:            "MutatingWebhookConfiguration",
+			wantMsgContains: "explicitly denied",
+		},
+		{
+			kind:            "ValidatingWebhookConfiguration",
+			wantMsgContains: "explicitly denied",
+		},
+		{
+			kind:            "CustomResourceDefinition",
+			wantMsgContains: "explicitly denied",
+		},
+		{
+			kind:            "APIService",
+			wantMsgContains: "explicitly denied",
+		},
+		{
+			kind:            "PriorityClass",
+			wantMsgContains: "explicitly denied",
+		},
+		{
+			kind:            "StorageClass",
+			wantMsgContains: "explicitly denied",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc // capture
+		t.Run(tc.kind+"_is_denied", func(t *testing.T) {
+			t.Parallel()
+			result := p.Evaluate(ctx, makeObjOfKind(tc.kind))
+			if result.Passed {
+				t.Errorf("kind %q should be blocked but was allowed", tc.kind)
+			}
+			if result.Severity != "blocking" {
+				t.Errorf("kind %q: want severity blocking, got %q", tc.kind, result.Severity)
+			}
+			if !strings.Contains(result.Message, tc.wantMsgContains) {
+				t.Errorf("kind %q: message %q does not contain %q", tc.kind, result.Message, tc.wantMsgContains)
+			}
+		})
+	}
+}
+
+func TestKindAllowlistPolicy_UnknownKindIsFailClosed(t *testing.T) {
+	ctx := context.Background()
+	p := &KindAllowlistPolicy{}
+
+	unknownKinds := []string{"Foo", "Bar", "CronJob", "DaemonSet", "StatefulSet", "Job"}
+
+	for _, kind := range unknownKinds {
+		kind := kind // capture
+		t.Run(kind+"_is_denied_fail_closed", func(t *testing.T) {
+			t.Parallel()
+			result := p.Evaluate(ctx, makeObjOfKind(kind))
+			if result.Passed {
+				t.Errorf("unknown kind %q should be fail-closed (denied) but was allowed", kind)
+			}
+			if result.Severity != "blocking" {
+				t.Errorf("unknown kind %q: want severity blocking, got %q", kind, result.Severity)
+			}
+			if !strings.Contains(result.Message, "not on the allowlist") {
+				t.Errorf("unknown kind %q: message %q should contain \"not on the allowlist\"", kind, result.Message)
+			}
+		})
+	}
+}
+
+func TestNewKindAllowlistPolicy_ExtraAllowedUnlocksKind(t *testing.T) {
+	ctx := context.Background()
+
+	extraKind := "CronJob"
+	p := NewKindAllowlistPolicy([]string{extraKind}, nil)
+
+	t.Run("extra_allowed_kind_passes", func(t *testing.T) {
+		result := p.Evaluate(ctx, makeObjOfKind(extraKind))
+		if !result.Passed {
+			t.Errorf("kind %q added via extraAllowed should pass, got: %s", extraKind, result.Message)
+		}
+	})
+
+	t.Run("baseline_allowed_kinds_still_pass", func(t *testing.T) {
+		result := p.Evaluate(ctx, makeObjOfKind("Deployment"))
+		if !result.Passed {
+			t.Errorf("baseline kind Deployment should still pass after extraAllowed extension: %s", result.Message)
+		}
+	})
+
+	t.Run("baseline_denied_kinds_still_blocked", func(t *testing.T) {
+		result := p.Evaluate(ctx, makeObjOfKind("ClusterRole"))
+		if result.Passed {
+			t.Errorf("baseline denied kind ClusterRole should still be blocked after extraAllowed extension")
+		}
+	})
+
+	t.Run("unknown_kinds_still_fail_closed", func(t *testing.T) {
+		result := p.Evaluate(ctx, makeObjOfKind("Foo"))
+		if result.Passed {
+			t.Errorf("unknown kind Foo should still be fail-closed even after extraAllowed extension")
+		}
+	})
+}
+
+func TestNewKindAllowlistPolicy_ExtraDenied(t *testing.T) {
+	ctx := context.Background()
+
+	// Add "DaemonSet" to the denylist (it is not in baseline allowed, so it would
+	// normally produce a "not on the allowlist" message; with extraDenied it
+	// should instead produce the "explicitly denied" message).
+	p := NewKindAllowlistPolicy(nil, []string{"DaemonSet"})
+
+	result := p.Evaluate(ctx, makeObjOfKind("DaemonSet"))
+	if result.Passed {
+		t.Fatalf("DaemonSet added via extraDenied should be blocked")
+	}
+	if !strings.Contains(result.Message, "explicitly denied") {
+		t.Errorf("DaemonSet in extraDenied: message %q should contain \"explicitly denied\"", result.Message)
+	}
+}
+
+// --------------------------------------------------------------------------
+// Engine integration: KindAllowlistPolicy blocks high-risk Kinds end-to-end
+// --------------------------------------------------------------------------
+
+func TestEngine_KindAllowlistBlocksDeniedKinds(t *testing.T) {
+	ctx := context.Background()
+	engine := NewEngine()
+
+	deniedKinds := []string{
+		"ClusterRole",
+		"ClusterRoleBinding",
+		"Namespace",
+		"MutatingWebhookConfiguration",
+		"ValidatingWebhookConfiguration",
+		"CustomResourceDefinition",
+	}
+
+	for _, kind := range deniedKinds {
+		kind := kind // capture
+		t.Run("engine_blocks_"+kind, func(t *testing.T) {
+			t.Parallel()
+			obj := makeObjOfKind(kind)
+			result, err := engine.EvaluateManifest(ctx, obj, kind, "test-"+kind, "default")
+			if err != nil {
+				t.Fatalf("EvaluateManifest error: %v", err)
+			}
+			if result.Passed {
+				t.Errorf("engine should have blocked kind %q but result.Passed=true", kind)
+			}
+
+			// Confirm the blocking violation comes from the allowlist policy.
+			found := false
+			for _, v := range result.Violations {
+				if v.Policy == "kind-allowlist" && v.Severity == "blocking" {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected a blocking violation from policy \"kind-allowlist\" for kind %q; got: %+v", kind, result.Violations)
+			}
+		})
+	}
+}
+
+// --------------------------------------------------------------------------
+// Configurable severity – default "warning", WithSeverity, NewStrictEngine,
+// Engine.SetSeverity round-trip
+// --------------------------------------------------------------------------
+
+// TestConfigurablePolicies_DefaultSeverityIsWarning verifies that the zero
+// value of each configurable policy reports "warning", preserving backward
+// compatibility for callers that already construct these structs directly.
+func TestConfigurablePolicies_DefaultSeverityIsWarning(t *testing.T) {
+	policies := []Policy{
+		&ResourceLimitsPolicy{},
+		&ReadinessProbePolicy{},
+		&LivenessProbePolicy{},
+	}
+	for _, p := range policies {
+		p := p // capture
+		t.Run(p.Name(), func(t *testing.T) {
+			if got := p.Severity(); got != "warning" {
+				t.Errorf("zero-value %T.Severity() = %q, want \"warning\"", p, got)
+			}
+		})
+	}
+}
+
+// TestConfigurablePolicies_WithSeverityFlipsToBlocking verifies that
+// WithSeverity("blocking") causes Severity() to return "blocking" and that
+// a failing evaluation emits a result with severity "blocking".
+func TestConfigurablePolicies_WithSeverityFlipsToBlocking(t *testing.T) {
+	ctx := context.Background()
+
+	// A Deployment that omits resource limits, readiness probe, and liveness probe.
+	noLimitsDeployment := makeDeployment("no-limits", map[string]interface{}{
+		"template": map[string]interface{}{
+			"spec": map[string]interface{}{
+				"containers": []interface{}{
+					map[string]interface{}{"name": "app", "image": "docker.io/library/nginx:latest"},
+				},
+			},
+		},
+	})
+
+	tests := []struct {
+		name   string
+		policy Policy
+	}{
+		{
+			name:   "ResourceLimitsPolicy",
+			policy: new(ResourceLimitsPolicy).WithSeverity("blocking"),
+		},
+		{
+			name:   "ReadinessProbePolicy",
+			policy: new(ReadinessProbePolicy).WithSeverity("blocking"),
+		},
+		{
+			name:   "LivenessProbePolicy",
+			policy: new(LivenessProbePolicy).WithSeverity("blocking"),
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc // capture
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.policy.Severity(); got != "blocking" {
+				t.Errorf("WithSeverity(\"blocking\"): Severity() = %q, want \"blocking\"", got)
+			}
+
+			result := tc.policy.Evaluate(ctx, noLimitsDeployment)
+			if result.Passed {
+				t.Fatal("expected policy to fail on deployment without limits/probes, but it passed")
+			}
+			if result.Severity != "blocking" {
+				t.Errorf("PolicyResult.Severity = %q, want \"blocking\"", result.Severity)
+			}
+		})
+	}
+}
+
+// TestNewStrictEngine_BlocksMissingLimits verifies that NewStrictEngine
+// promotes the three configurable policies to "blocking", so a Deployment
+// missing resource limits yields Passed=false from EvaluateManifest.
+func TestNewStrictEngine_BlocksMissingLimits(t *testing.T) {
+	ctx := context.Background()
+	engine := NewStrictEngine()
+
+	noLimitsDeployment := makeDeployment("no-limits-strict", map[string]interface{}{
+		"template": map[string]interface{}{
+			"spec": map[string]interface{}{
+				"securityContext": map[string]interface{}{"runAsNonRoot": true},
+				"containers": []interface{}{
+					map[string]interface{}{
+						"name":  "app",
+						"image": "docker.io/library/nginx:latest",
+						// intentionally omit resources, readinessProbe, livenessProbe
+					},
+				},
+			},
+		},
+	})
+
+	result, err := engine.EvaluateManifest(ctx, noLimitsDeployment, "Deployment", "no-limits-strict", "default")
+	if err != nil {
+		t.Fatalf("EvaluateManifest returned unexpected error: %v", err)
+	}
+
+	if result.Passed {
+		t.Error("NewStrictEngine: EvaluateManifest should have failed for a deployment missing resource limits, but Passed=true")
+	}
+
+	found := false
+	for _, v := range result.Violations {
+		if v.Policy == "resource-limits-required" && v.Severity == "blocking" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a blocking violation from \"resource-limits-required\"; got violations: %+v", result.Violations)
+	}
+}
+
+// TestNewStrictEngine_CompliantDeploymentPasses confirms that a fully
+// compliant deployment still passes the strict engine, ruling out false
+// positives introduced by the severity promotion.
+func TestNewStrictEngine_CompliantDeploymentPasses(t *testing.T) {
+	ctx := context.Background()
+	engine := NewStrictEngine()
+
+	result, err := engine.EvaluateManifest(
+		ctx,
+		makeDeployment("compliant-strict", fullCompliantDeploymentSpec()),
+		"Deployment", "compliant-strict", "default",
+	)
+	if err != nil {
+		t.Fatalf("EvaluateManifest returned unexpected error: %v", err)
+	}
+	if !result.Passed {
+		t.Errorf("NewStrictEngine: compliant deployment should pass; violations: %+v", result.Violations)
+	}
+}
+
+// TestEngine_SetSeverity_RoundTrip verifies the runtime mutation path used by
+// the operator.strictPolicies knob: start with a default engine (warnings),
+// call SetSeverity to promote to blocking, confirm the change, then demote
+// back and confirm again.
+func TestEngine_SetSeverity_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	engine := NewEngine()
+
+	noLimitsDeployment := makeDeployment("no-limits-rt", map[string]interface{}{
+		"template": map[string]interface{}{
+			"spec": map[string]interface{}{
+				"securityContext": map[string]interface{}{"runAsNonRoot": true},
+				"containers": []interface{}{
+					map[string]interface{}{
+						"name":  "app",
+						"image": "docker.io/library/nginx:latest",
+					},
+				},
+			},
+		},
+	})
+
+	// Phase 1: default engine must not block on missing resource limits.
+	resultDefault, err := engine.EvaluateManifest(ctx, noLimitsDeployment, "Deployment", "no-limits-rt", "default")
+	if err != nil {
+		t.Fatalf("phase 1: unexpected error: %v", err)
+	}
+	for _, v := range resultDefault.Violations {
+		if v.Policy == "resource-limits-required" && v.Severity == "blocking" {
+			t.Errorf("phase 1: default engine emitted blocking violation from resource-limits-required")
+		}
+	}
+
+	// Phase 2: promote resource-limits-required to blocking.
+	if ok := engine.SetSeverity("resource-limits-required", "blocking"); !ok {
+		t.Fatal("SetSeverity returned false for a registered policy")
+	}
+
+	resultStrict, err := engine.EvaluateManifest(ctx, noLimitsDeployment, "Deployment", "no-limits-rt", "default")
+	if err != nil {
+		t.Fatalf("phase 2: unexpected error: %v", err)
+	}
+	if resultStrict.Passed {
+		t.Error("phase 2: engine should have blocked after SetSeverity(blocking)")
+	}
+	foundBlocking := false
+	for _, v := range resultStrict.Violations {
+		if v.Policy == "resource-limits-required" && v.Severity == "blocking" {
+			foundBlocking = true
+		}
+	}
+	if !foundBlocking {
+		t.Errorf("phase 2: expected blocking violation from resource-limits-required; got %+v", resultStrict.Violations)
+	}
+
+	// Phase 3: demote back to warning – engine must pass again.
+	if ok := engine.SetSeverity("resource-limits-required", "warning"); !ok {
+		t.Fatal("SetSeverity returned false on demotion")
+	}
+
+	resultDemoted, err := engine.EvaluateManifest(ctx, noLimitsDeployment, "Deployment", "no-limits-rt", "default")
+	if err != nil {
+		t.Fatalf("phase 3: unexpected error: %v", err)
+	}
+	if !resultDemoted.Passed {
+		t.Errorf("phase 3: engine should pass after demotion to warning; violations: %+v", resultDemoted.Violations)
+	}
+}
+
+// TestEngine_SetSeverity_UnknownPolicyReturnsFalse confirms that calling
+// SetSeverity with an unregistered policy name returns false.
+func TestEngine_SetSeverity_UnknownPolicyReturnsFalse(t *testing.T) {
+	engine := NewEngine()
+	if ok := engine.SetSeverity("nonexistent-policy", "blocking"); ok {
+		t.Error("SetSeverity should return false for an unregistered policy name")
+	}
+}
+
+// TestNewEngine_DefaultEngineWarningPoliciesDoNotBlock verifies that
+// NewEngine's three configurable policies emit warnings (not blocking) so
+// that existing callers whose manifests lack probes/limits are not disrupted.
+func TestNewEngine_DefaultEngineWarningPoliciesDoNotBlock(t *testing.T) {
+	ctx := context.Background()
+	engine := NewEngine()
+
+	// Satisfies all blocking policies but omits limits and probes.
+	noProbesDeployment := makeDeployment("no-probes", map[string]interface{}{
+		"template": map[string]interface{}{
+			"spec": map[string]interface{}{
+				"securityContext": map[string]interface{}{"runAsNonRoot": true},
+				"containers": []interface{}{
+					map[string]interface{}{
+						"name":  "app",
+						"image": "docker.io/library/nginx:latest",
+					},
+				},
+			},
+		},
+	})
+
+	result, err := engine.EvaluateManifest(ctx, noProbesDeployment, "Deployment", "no-probes", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, v := range result.Violations {
+		if v.Severity == "blocking" {
+			t.Errorf("default engine should not block on missing probes/limits; blocking violation from %q: %s", v.Policy, v.Message)
+		}
+	}
+
+	if !result.Passed {
+		t.Errorf("default engine must return Passed=true when only warning-level policies fire; violations: %+v", result.Violations)
 	}
 }

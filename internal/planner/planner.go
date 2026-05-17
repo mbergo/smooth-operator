@@ -34,11 +34,12 @@ type Planner struct {
 	riskAssessor  *RiskAssessor
 }
 
-// NewPlanner creates a new planner
-func NewPlanner(client client.Client, riskOptions RiskAssessorOptions) *Planner {
+// NewPlanner creates a new planner. validatorOpts are forwarded to
+// ManifestValidator and can include WithAllowCrossNamespace.
+func NewPlanner(c client.Client, riskOptions RiskAssessorOptions, validatorOpts ...ManifestValidatorOption) *Planner {
 	return &Planner{
-		validator:     NewManifestValidator(client),
-		diffGenerator: NewDiffGenerator(client),
+		validator:     NewManifestValidator(c, validatorOpts...),
+		diffGenerator: NewDiffGenerator(c),
 		policyEngine:  policy.NewEngine(),
 		riskAssessor:  NewRiskAssessor(riskOptions),
 	}
@@ -75,6 +76,24 @@ func (p *Planner) CreatePlan(
 			errMsg := fmt.Sprintf("Manifest %d (%s) validation failed: %v", i, patch.Kind, err)
 			plan.Errors = append(plan.Errors, errMsg)
 			log.Error(err, "Manifest validation failed", "index", i, "kind", patch.Kind)
+			continue
+		}
+
+		// Step 1b: Enforce namespace constraint before any further processing.
+		// Manifests targeting a different namespace (or cluster-scoped kinds)
+		// are rejected here to prevent cross-tenant writes. The namespace is
+		// never rewritten automatically — the error is surfaced so the operator
+		// UI and logs can present the rejection clearly.
+		if nsErrs := p.validator.EnforceNamespace(targetNamespace, validated); len(nsErrs) > 0 {
+			for _, e := range nsErrs {
+				plan.Errors = append(plan.Errors, fmt.Sprintf("Manifest %d (%s) namespace enforcement: %s", i, patch.Kind, e))
+			}
+			log.Error(nil, "Namespace enforcement rejected manifest",
+				"index", i,
+				"kind", patch.Kind,
+				"manifestNamespace", validated.Namespace,
+				"targetNamespace", targetNamespace,
+			)
 			continue
 		}
 

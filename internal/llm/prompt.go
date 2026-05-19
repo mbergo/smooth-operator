@@ -201,4 +201,3 @@ Guidelines:
 
 Output format: JSON only, no markdown, no extra text.`
 }
-

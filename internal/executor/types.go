@@ -59,19 +59,19 @@ type AppliedResource struct {
 type RolloutStatus struct {
 	DeploymentName string
 	Namespace      string
-	
+
 	// Rollout state
-	State          string // progressing, complete, failed, timedout
-	ReadyReplicas  int32
-	TotalReplicas  int32
-	
+	State         string // progressing, complete, failed, timedout
+	ReadyReplicas int32
+	TotalReplicas int32
+
 	// Timing
-	StartedAt  time.Time
+	StartedAt   time.Time
 	CompletedAt time.Time
-	
+
 	// Conditions
 	Conditions []string
-	
+
 	// Health check results
 	HealthChecks []HealthCheckResult
 }
@@ -98,16 +98,16 @@ type RollbackResult struct {
 type ExecutorOptions struct {
 	// RolloutTimeout is the max time to wait for a rollout
 	RolloutTimeout time.Duration
-	
+
 	// HealthCheckInterval is how often to check pod health
 	HealthCheckInterval time.Duration
-	
+
 	// FailureThreshold is the number of failed checks before rollback
 	FailureThreshold int
-	
+
 	// EnableRollback determines if automatic rollback is enabled
 	EnableRollback bool
-	
+
 	// DryRunFirst performs dry-run before actual apply
 	DryRunFirst bool
 }
@@ -128,4 +128,3 @@ type BackupState struct {
 	Resources map[string]*unstructured.Unstructured // Key: kind/namespace/name
 	CreatedAt time.Time
 }
-

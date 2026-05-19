@@ -44,11 +44,11 @@ type Client struct {
 
 // RateLimiter implements a simple token bucket rate limiter
 type RateLimiter struct {
-	mu            sync.Mutex
-	tokens        int
-	maxTokens     int
-	refillRate    time.Duration
-	lastRefill    time.Time
+	mu         sync.Mutex
+	tokens     int
+	maxTokens  int
+	refillRate time.Duration
+	lastRefill time.Time
 }
 
 // ClientOptions configures the LLM client
@@ -233,4 +233,3 @@ func (rl *RateLimiter) Wait(ctx context.Context) error {
 	rl.tokens--
 	return nil
 }
-

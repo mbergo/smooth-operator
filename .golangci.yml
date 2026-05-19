@@ -6,7 +6,7 @@ run:
 linters:
   enable:
     - copyloopvar
-    - dupl
+    - dupl  
     - errcheck
     - ginkgolinter
     - goconst
@@ -22,23 +22,3 @@ linters:
     - unconvert
     - unparam
     - unused
-
-settings:
-  revive:
-    rules:
-      - name: comment-spacings
-      - name: import-shadowing
-
-exclusions:
-  rules:
-    - linters:
-        - lll
-      path: "api/.*"
-    - linters:
-        - dupl
-        - lll  
-      path: "internal/.*"
-  paths:
-    - third_party
-    - builtin
-    - examples

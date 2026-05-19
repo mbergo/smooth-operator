@@ -51,7 +51,15 @@ var _ = Describe("ChatSession Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: smoothv1.ChatSessionSpec{
+						User:            "test-user@example.com",
+						TargetNamespace: "test-namespace",
+						Prompt:          "test prompt",
+						Metadata: smoothv1.SessionMetadata{
+							GitRepo: "https://github.com/test/test.git",
+							GitPath: "test-path",
+						},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}

@@ -39,11 +39,11 @@ import (
 	smoothv1 "github.com/mbergo/smooth-operator/api/v1"
 	"github.com/mbergo/smooth-operator/internal/collector"
 	"github.com/mbergo/smooth-operator/internal/controller"
+	"github.com/mbergo/smooth-operator/internal/executor"
 	"github.com/mbergo/smooth-operator/internal/llm"
 	"github.com/mbergo/smooth-operator/internal/logs"
 	"github.com/mbergo/smooth-operator/internal/metrics"
 	"github.com/mbergo/smooth-operator/internal/planner"
-	"github.com/mbergo/smooth-operator/internal/executor"
 	// +kubebuilder:scaffold:imports
 )
 

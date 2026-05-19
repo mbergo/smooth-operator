@@ -123,7 +123,7 @@ func (w *RolloutWatcher) watchDeploymentRollout(ctx context.Context, namespace, 
 
 			// Check conditions
 			for _, condition := range deployment.Status.Conditions {
-				status.Conditions = append(status.Conditions, 
+				status.Conditions = append(status.Conditions,
 					fmt.Sprintf("%s: %s (%s)", condition.Type, condition.Status, condition.Message))
 			}
 
@@ -246,4 +246,3 @@ func (w *RolloutWatcher) checkPodHealth(ctx context.Context, namespace string, d
 
 	return allHealthy, healthChecks
 }
-

@@ -100,5 +100,3 @@ func init() {
 		ExecutionDurationSeconds,
 	)
 }
-
-

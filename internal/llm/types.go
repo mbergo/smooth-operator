@@ -18,10 +18,10 @@ package llm
 
 // InferredNeed represents a resource that the LLM determined is needed
 type InferredNeed struct {
-	Type     string  `json:"type"`     // HPA, Service-LB, Ingress, Probe, etc.
-	Reason   string  `json:"reason"`   // Why this is needed
-	Priority string  `json:"priority"` // low, med, high
-	Spec     string  `json:"spec"`     // Suggested configuration (YAML)
+	Type     string `json:"type"`     // HPA, Service-LB, Ingress, Probe, etc.
+	Reason   string `json:"reason"`   // Why this is needed
+	Priority string `json:"priority"` // low, med, high
+	Spec     string `json:"spec"`     // Suggested configuration (YAML)
 }
 
 // PatchSuggestion represents a suggested Kubernetes manifest
@@ -68,4 +68,3 @@ type PromptContext struct {
 	// Chat session ID
 	ChatSessionID string
 }
-

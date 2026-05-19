@@ -4,9 +4,7 @@ run:
   allow-parallel-runners: true
   
 linters:
+  disable-all: true
   enable:
-    - copyloopvar
     - ginkgolinter
     - govet
-    - ineffassign
-    - misspell

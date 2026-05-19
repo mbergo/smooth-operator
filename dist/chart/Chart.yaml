@@ -1,0 +1,27 @@
+apiVersion: v2
+name: smooth-operator
+description: |
+  Smooth Operator — a Kubernetes-native conversational operator that uses LLMs
+  to infer, suggest, and apply infrastructure changes based on natural language
+  prompts via ChatSession CRDs.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.28.0-0"
+keywords:
+  - kubernetes
+  - operator
+  - gitops
+  - chatops
+  - llm
+home: https://github.com/mbergo/smooth-operator
+sources:
+  - https://github.com/mbergo/smooth-operator
+maintainers:
+  - name: Marcus Bergo
+    email: marcusbergo@gmail.com
+annotations:
+  artifacthub.io/category: integration-delivery
+  artifacthub.io/operator: "true"
+  artifacthub.io/operatorCapabilities: Basic Install
+  artifacthub.io/license: Apache-2.0

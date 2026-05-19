@@ -84,10 +84,14 @@ func (r *SmoothActionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if smoothAction.Status.State == "" {
 		if smoothAction.Spec.Mode == "auto" {
 			smoothAction.Status.State = "Proposed"
-			r.Recorder.Event(smoothAction, "Normal", "Proposed", "SmoothAction proposed for auto-execution")
+			if r.Recorder != nil {
+				r.Recorder.Event(smoothAction, "Normal", "Proposed", "SmoothAction proposed for auto-execution")
+			}
 		} else {
 			smoothAction.Status.State = "Proposed"
-			r.Recorder.Event(smoothAction, "Normal", "Proposed", "SmoothAction proposed, awaiting approval")
+			if r.Recorder != nil {
+				r.Recorder.Event(smoothAction, "Normal", "Proposed", "SmoothAction proposed, awaiting approval")
+			}
 		}
 
 		if err := r.Status().Update(ctx, smoothAction); err != nil {
@@ -118,8 +122,10 @@ func (r *SmoothActionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if smoothAction.Spec.Approval.ApprovedBy != "" {
 			log.Info("Approval received, proceeding with execution",
 				"approvedBy", smoothAction.Spec.Approval.ApprovedBy)
-			r.Recorder.Event(smoothAction, "Normal", "Approved",
-				fmt.Sprintf("Approved by %s", smoothAction.Spec.Approval.ApprovedBy))
+			if r.Recorder != nil {
+				r.Recorder.Event(smoothAction, "Normal", "Approved",
+					fmt.Sprintf("Approved by %s", smoothAction.Spec.Approval.ApprovedBy))
+			}
 		}
 	}
 
@@ -144,8 +150,10 @@ func (r *SmoothActionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		// Phase 6: Clear any previous errors
 		smoothAction.Status.Errors = []string{}
 
-		r.Recorder.Event(smoothAction, "Normal", "Applied",
-			fmt.Sprintf("Successfully applied %d manifests", len(smoothAction.Spec.Patches)))
+		if r.Recorder != nil {
+			r.Recorder.Event(smoothAction, "Normal", "Applied",
+				fmt.Sprintf("Successfully applied %d manifests", len(smoothAction.Spec.Patches)))
+		}
 
 		log.Info("SmoothAction executed successfully",
 			"commit", smoothAction.Status.Git.Commit,
